@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 import typing as tp
 import equinox as eqx
 import jax
@@ -64,9 +65,10 @@ class Block(eqx.Module):
     ln1: eqx.Module
     ln2: eqx.Module
     def __init__(self, n_embd, n_head, bias, dropout, key):
+        key1, key2 = jrandom.split(key)
         self.attn = CausalSelfAttention(
-            n_embd=n_embd, n_head=n_head, bias=bias, dropout=dropout, key=key)
-        self.mlp = MLP(n_embd=n_embd, bias=bias, dropout=dropout, key=key)
+            n_embd=n_embd, n_head=n_head, bias=bias, dropout=dropout, key=key1)
+        self.mlp = MLP(n_embd=n_embd, bias=bias, dropout=dropout, key=key2)
         self.ln1 = eqx.nn.LayerNorm(n_embd, eps=1e-5, use_bias=bias)
         self.ln2 = eqx.nn.LayerNorm(n_embd, eps=1e-5, use_bias=bias)
 
@@ -78,11 +80,54 @@ class Block(eqx.Module):
         return x + jax.vmap(self.mlp)(ln2(x), key2)
 
 
+@dataclass
+class GPTConfig:
+    block_size: int = 1024
+    vocab_size: int = 50304 # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 768
+    dropout: float = 0.0
+    bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+
+
+class GPT(eqx.Module):
+    wte: eqx.Module
+    wpe: eqx.Module
+    drop: eqx.Module
+    blocks: tp.List[eqx.Module]
+    ln_f: eqx.Module
+    lm_head: eqx.Module
+
+    def __init__(self, config, key):
+        key1, key2, key3, key4 = jrandom.split(key, 4)
+        self.wte = eqx.nn.Embedding(config.vocab_size, config.n_embd, key=key1)
+        self.wpe = eqx.nn.Embedding(config.block_size, config.n_embd, key=key2)
+        self.drop = eqx.nn.Dropout(config.dropout)
+        block_keys = jrandom.split(key3, config.n_layer)
+        self.blocks = [Block(
+            config.n_embd, config.n_head, config.bias, config.dropout, bkey
+        ) for bkey in block_keys]
+        self.ln_f = eqx.nn.LayerNorm(config.n_embd, eps=1e-5, use_bias=config.bias)
+        self.lm_head = eqx.nn.Linear(config.n_embd, config.vocab_size, use_bias=config.bias, key=key4)
+
+    def __call__(self, x, key):  # (T, vocab_size)
+        key, key1 = jrandom.split(key)
+        x = jax.vmap(self.wte)(x) + jax.vmap(self.wpe)(jnp.arange(x.shape[0]))
+        x = self.drop(x, key=key1)
+        keys = jrandom.split(key, len(self.blocks))
+        for subkey, block in zip(keys, self.blocks):
+            x = block(x, subkey)
+        x = jax.vmap(self.ln_f)(x)
+        logits = jax.vmap(self.lm_head)(x)
+        return logits  # (T, vocab_size)
+
+
 if __name__ == "__main__":
     key = jrandom.PRNGKey(0)
-    key, key1 = jrandom.split(key)
-    block = Block(512, 8, False, 0.1, key1)
-    inp = jnp.ones((10, 100, 512))
-    key, subkey = jrandom.split(key)
-    out = jax.vmap(block)(inp, jrandom.split(subkey, inp.shape[0]))
+    key, key1, key2, key3 = jrandom.split(key, 4)
+    config = GPTConfig()
+    gpt = GPT(config, key1)
+    inp = jrandom.randint(key2, (10, 100), 0, config.vocab_size)
+    out = jax.vmap(gpt)(inp, jrandom.split(key3, inp.shape[0]))
     print(inp.shape, out.shape)
