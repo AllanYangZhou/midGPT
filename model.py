@@ -2,6 +2,7 @@ from dataclasses import dataclass
 import typing as tp
 import equinox as eqx
 import jax
+from jax import vmap
 import jax.numpy as jnp
 import jax.random as jrandom
 
@@ -42,7 +43,7 @@ class CausalSelfAttention(eqx.Module):
     def __call__(self, x, key):
         key1, key2 = jrandom.split(key)
         T, C = x.shape
-        qkv = jax.vmap(self.c_attn)(x)  # (T, 3 * C)
+        qkv = vmap(self.c_attn)(x)  # (T, 3 * C)
         q, k, v = jnp.split(qkv, 3, axis=-1)  # (T, C)
         n_per_head = self.n_embd // self.n_head
         # (T, C) -> (n_head, T, n_per_head)
@@ -56,7 +57,7 @@ class CausalSelfAttention(eqx.Module):
         att = jax.nn.softmax(att / jnp.sqrt(n_per_head), axis=-1)
         att = self.attn_dropout(att, key=key1)
         out = jnp.reshape(jnp.transpose(att @ v, (1, 0, 2)), (T, C))
-        return self.resid_dropout(jax.vmap(self.c_proj)(out), key=key2)
+        return self.resid_dropout(vmap(self.c_proj)(out), key=key2)
 
 
 class Block(eqx.Module):
@@ -73,11 +74,11 @@ class Block(eqx.Module):
         self.ln2 = eqx.nn.LayerNorm(n_embd, eps=1e-5, use_bias=bias)
 
     def __call__(self, x, key):
-        ln1, ln2 = jax.vmap(self.ln1), jax.vmap(self.ln2)
+        ln1, ln2 = vmap(self.ln1), vmap(self.ln2)
         key1, key2 = jrandom.split(key)
         x = x + self.attn(ln1(x), key1)
         key2 = jrandom.split(key2, x.shape[0])
-        return x + jax.vmap(self.mlp)(ln2(x), key2)
+        return x + vmap(self.mlp)(ln2(x), key2)
 
 
 @dataclass
@@ -113,13 +114,13 @@ class GPT(eqx.Module):
 
     def __call__(self, x, key):  # (T, vocab_size)
         key, key1 = jrandom.split(key)
-        x = jax.vmap(self.wte)(x) + jax.vmap(self.wpe)(jnp.arange(x.shape[0]))
+        x = vmap(self.wte)(x) + vmap(self.wpe)(jnp.arange(x.shape[0]))
         x = self.drop(x, key=key1)
         keys = jrandom.split(key, len(self.blocks))
         for subkey, block in zip(keys, self.blocks):
             x = block(x, subkey)
-        x = jax.vmap(self.ln_f)(x)
-        logits = jax.vmap(self.lm_head)(x)
+        x = vmap(self.ln_f)(x)
+        logits = vmap(self.lm_head)(x)
         return logits  # (T, vocab_size)
 
 
@@ -129,5 +130,5 @@ if __name__ == "__main__":
     config = GPTConfig()
     gpt = GPT(config, key1)
     inp = jrandom.randint(key2, (10, 100), 0, config.vocab_size)
-    out = jax.vmap(gpt)(inp, jrandom.split(key3, inp.shape[0]))
+    out = vmap(gpt)(inp, jrandom.split(key3, inp.shape[0]))
     print(inp.shape, out.shape)
