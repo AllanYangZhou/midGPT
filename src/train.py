@@ -3,17 +3,14 @@ from dataclasses import dataclass
 import os
 import equinox as eqx
 import jax
-import jax.random as jrandom
-import jax.numpy as jnp
 import jmp
 import optax
 import numpy as np
 from tqdm import tqdm
 from .model import GPT, GPTConfig
 
+jnp, jrandom, vmap, scan = jax.numpy, jax.random, jax.vmap, jax.lax.scan
 PRNGKey = jrandom.PRNGKey
-vmap = jax.vmap
-scan = jax.lax.scan
 
 
 def get_batch(data, block_size, batch_size):

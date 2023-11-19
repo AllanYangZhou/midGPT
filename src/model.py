@@ -3,10 +3,8 @@ import math
 import typing as tp
 import equinox as eqx
 import jax
-import jax.numpy as jnp
-import jax.random as jrandom
 
-vmap = jax.vmap
+jnp, jrandom, vmap = jax.numpy, jax.random, jax.vmap
 
 
 def reinit_linear(layer: eqx.nn.Linear, key, w_std=0.02):
