@@ -41,8 +41,8 @@ class ExperimentConfig:
     beta2: float = 0.99
     weight_decay: float = 0.1
     eval_interval: int = 2000
+    # Need an A40/A100 to natively support bfloat16.
     # policy: jmp.Policy = jmp.get_policy("params=float32,compute=bfloat16,output=bfloat16")
-    # TODO: at least on iris3, MP is somehow slower.
     policy: jmp.Policy = jmp.get_policy("params=float32,compute=float32,output=float32")
     model_config: GPTConfig = field(init=False)
 
