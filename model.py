@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import math
 import typing as tp
 import equinox as eqx
 import jax
@@ -7,15 +8,25 @@ import jax.numpy as jnp
 import jax.random as jrandom
 
 
+def reinit_linear(layer: eqx.nn.Linear, key, w_std=0.02):
+    weight = jrandom.normal(key, layer.weight.shape) * w_std
+    layer = eqx.tree_at(lambda layer: layer.weight, layer, weight)
+    if layer.bias is not None:
+        bias = jnp.zeros_like(layer.bias)
+        layer = eqx.tree_at(lambda layer: layer.bias, layer, bias)
+    return layer
+
+
 class MLP(eqx.Module):
     c_fc: eqx.Module
     c_proj: eqx.Module
     dropout: eqx.Module
 
-    def __init__(self, n_embd, bias, dropout, key):
+    def __init__(self, n_embd, bias, dropout, c_proj_std, key):
         key1, key2 = jrandom.split(key)
-        self.c_fc = eqx.nn.Linear(n_embd, 4 * n_embd, use_bias=bias, key=key1)
-        self.c_proj = eqx.nn.Linear(4 * n_embd, n_embd, use_bias=bias, key=key2)
+        self.c_fc = reinit_linear(eqx.nn.Linear(n_embd, 4 * n_embd, use_bias=bias, key=key1), key1)
+        self.c_proj = reinit_linear(eqx.nn.Linear(
+            4 * n_embd, n_embd, use_bias=bias, key=key2), key2, w_std=c_proj_std)
         self.dropout = eqx.nn.Dropout(dropout)
 
     def __call__(self, x, key):
@@ -31,12 +42,13 @@ class CausalSelfAttention(eqx.Module):
     attn_dropout: eqx.Module
     resid_dropout: eqx.Module
 
-    def __init__(self, n_embd, n_head, bias, dropout, key):
+    def __init__(self, n_embd, n_head, bias, dropout, c_proj_std, key):
         key1, key2 = jrandom.split(key)
         assert n_embd % n_head == 0
         self.n_head, self.n_embd = n_head, n_embd
-        self.c_attn = eqx.nn.Linear(n_embd, 3 * n_embd, use_bias=bias, key=key1)
-        self.c_proj = eqx.nn.Linear(n_embd, n_embd, use_bias=bias, key=key2)
+        self.c_attn = reinit_linear(eqx.nn.Linear(n_embd, 3 * n_embd, use_bias=bias, key=key1), key1)
+        self.c_proj = reinit_linear(eqx.nn.Linear(
+            n_embd, n_embd, use_bias=bias, key=key2), key2, w_std=c_proj_std)
         self.attn_dropout = eqx.nn.Dropout(dropout)
         self.resid_dropout = eqx.nn.Dropout(dropout)
 
@@ -52,12 +64,13 @@ class CausalSelfAttention(eqx.Module):
         v = jnp.transpose(jnp.reshape(v, (T, self.n_head, n_per_head)), (1, 0, 2))
         att = q @ jnp.transpose(k, (0, 2, 1))  # (n_head, T, T)
         # Causal mask
-        idx_x, idx_y = jnp.triu_indices(T, 0)
+        idx_x, idx_y = jnp.triu_indices(T, 1)
         att = att.at[..., idx_x, idx_y].set(float('-inf'))
         att = jax.nn.softmax(att / jnp.sqrt(n_per_head), axis=-1)
         att = self.attn_dropout(att, key=key1)
         out = jnp.reshape(jnp.transpose(att @ v, (1, 0, 2)), (T, C))
-        return self.resid_dropout(vmap(self.c_proj)(out), key=key2)
+        out = self.resid_dropout(vmap(self.c_proj)(out), key=key2)
+        return out
 
 
 class Block(eqx.Module):
@@ -65,11 +78,13 @@ class Block(eqx.Module):
     mlp: MLP
     ln1: eqx.Module
     ln2: eqx.Module
-    def __init__(self, n_embd, n_head, bias, dropout, key):
+    def __init__(self, n_embd, n_head, bias, dropout, c_proj_std, key):
         key1, key2 = jrandom.split(key)
         self.attn = CausalSelfAttention(
-            n_embd=n_embd, n_head=n_head, bias=bias, dropout=dropout, key=key1)
-        self.mlp = MLP(n_embd=n_embd, bias=bias, dropout=dropout, key=key2)
+            n_embd=n_embd, n_head=n_head, bias=bias, dropout=dropout, c_proj_std=c_proj_std,
+            key=key1)
+        self.mlp = MLP(
+            n_embd=n_embd, bias=bias, dropout=dropout, c_proj_std=c_proj_std, key=key2)
         self.ln1 = eqx.nn.LayerNorm(n_embd, eps=1e-5, use_bias=bias)
         self.ln2 = eqx.nn.LayerNorm(n_embd, eps=1e-5, use_bias=bias)
 
@@ -83,13 +98,13 @@ class Block(eqx.Module):
 
 @dataclass
 class GPTConfig:
-    block_size: int = 1024
-    vocab_size: int = 50304 # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
-    n_layer: int = 12
-    n_head: int = 12
-    n_embd: int = 768
-    dropout: float = 0.0
-    bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    block_size: int
+    vocab_size: int
+    n_layer: int
+    n_head: int
+    n_embd: int
+    dropout: float
+    bias: bool
 
 
 class GPT(eqx.Module):
@@ -102,15 +117,19 @@ class GPT(eqx.Module):
 
     def __init__(self, config, key):
         key1, key2, key3, key4 = jrandom.split(key, 4)
-        self.wte = eqx.nn.Embedding(config.vocab_size, config.n_embd, key=key1)
-        self.wpe = eqx.nn.Embedding(config.block_size, config.n_embd, key=key2)
+        embed_w1 = 0.02 * jrandom.normal(key1, (config.vocab_size, config.n_embd))
+        embed_w2 = 0.02 * jrandom.normal(key2, (config.block_size, config.n_embd))
+        self.wte = eqx.nn.Embedding(config.vocab_size, config.n_embd, weight=embed_w1)
+        self.wpe = eqx.nn.Embedding(config.block_size, config.n_embd, weight=embed_w2)
         self.drop = eqx.nn.Dropout(config.dropout)
         block_keys = jrandom.split(key3, config.n_layer)
+        c_proj_std = 0.02 / math.sqrt(2 * config.n_layer)
         self.blocks = [Block(
-            config.n_embd, config.n_head, config.bias, config.dropout, bkey
+            config.n_embd, config.n_head, config.bias, config.dropout, c_proj_std, bkey
         ) for bkey in block_keys]
         self.ln_f = eqx.nn.LayerNorm(config.n_embd, eps=1e-5, use_bias=config.bias)
-        self.lm_head = eqx.nn.Linear(config.n_embd, config.vocab_size, use_bias=config.bias, key=key4)
+        self.lm_head = reinit_linear(eqx.nn.Linear(
+            config.n_embd, config.vocab_size, use_bias=config.bias, key=key4), key4)
 
     def __call__(self, x, key):  # (T, vocab_size)
         key, key1 = jrandom.split(key)
@@ -122,13 +141,3 @@ class GPT(eqx.Module):
         x = vmap(self.ln_f)(x)
         logits = vmap(self.lm_head)(x)
         return logits  # (T, vocab_size)
-
-
-if __name__ == "__main__":
-    key = jrandom.PRNGKey(0)
-    key, key1, key2, key3 = jrandom.split(key, 4)
-    config = GPTConfig()
-    gpt = GPT(config, key1)
-    inp = jrandom.randint(key2, (10, 100), 0, config.vocab_size)
-    out = vmap(gpt)(inp, jrandom.split(key3, inp.shape[0]))
-    print(inp.shape, out.shape)

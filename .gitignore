@@ -1,3 +1,4 @@
 data/**/*.txt
 data/**/*.pkl
 data/**/*.bin
+__pycache__
