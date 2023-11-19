@@ -1,11 +1,10 @@
-from src.train import ExperimentConfig, get_vocab_size, train
+from src.train import ExperimentConfig, train
 from src.model import GPTConfig
 import jmp
 
 
-vocab_size = get_vocab_size('data/shakespeare_char')
 config = ExperimentConfig(
-    dataset='shakespeare_char',
+    data_dir='data/shakespeare_char',
     learning_rate=1e-3,
     batch_size=64,
     warmup_steps=100,
@@ -17,7 +16,7 @@ config = ExperimentConfig(
     eval_interval=2000,
     policy=jmp.get_policy("params=float32,compute=float32,output=float32"),
     model_config=GPTConfig(
-        block_size=256, vocab_size=vocab_size, n_layer=6, n_head=6,
+        block_size=256, vocab_size=65, n_layer=6, n_head=6,
         n_embd=384, dropout=0.2, bias=False,
     )
 )

@@ -1,7 +1,6 @@
 import typing as tp
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import os
-import pickle
 import equinox as eqx
 import jax
 import jax.random as jrandom
@@ -17,24 +16,11 @@ vmap = jax.vmap
 scan = jax.lax.scan
 
 
-def get_vocab_size(data_dir):
-    meta_path = os.path.join(data_dir, 'meta.pkl')
-    vocab_size = None
-    if os.path.exists(meta_path):
-        with open(meta_path, 'rb') as f:
-            meta = pickle.load(f)
-        vocab_size = meta['vocab_size']
-    if vocab_size is None:
-        vocab_size = 50304
-    return vocab_size
-
-
-def get_batch(data, block_size, batch_size, key: PRNGKey):
-    ix = jrandom.randint(key, (batch_size,), 0, len(data) - block_size)
-    x = jnp.take(data, np.arange(block_size) + ix[:, None], axis=0).astype(np.int32)
-    y = jnp.take(data, np.arange(1, block_size + 1) + ix[:, None], axis=0).astype(np.int32)
-    return jnp.array(x), jnp.array(y)
-
+def get_batch(data, block_size, batch_size):
+    ix = np.random.randint(0, len(data) - block_size, size=(batch_size,))
+    x = np.take(data, np.arange(block_size) + ix[:, None], axis=0).astype(np.int32)
+    y = np.take(data, np.arange(1, block_size + 1) + ix[:, None], axis=0).astype(np.int32)
+    return x, y
 
 
 def make_training_fns(config, optimizer):
@@ -53,23 +39,23 @@ def make_training_fns(config, optimizer):
         model = eqx.apply_updates(model, updates)
         return loss, model, opt_state
 
-    def evaluate(model, data, key: PRNGKey):
+    fast_loss_fn = eqx.filter_jit(loss_fn)
+    def evaluate(model, data):
         model = eqx.Partial(model, inference=True)
-        def _helper(loss_so_far, key):
-            x, y = get_batch(data, config.model_config.block_size, config.batch_size, key)
-            loss = loss_fn(model, x, y, None)
-            return loss_so_far + loss, None
         tot_loss = jnp.zeros(())
-        keys = jrandom.split(key, 200)
-        losses, _ = scan(_helper, tot_loss, keys)
-        return losses / keys.shape[0]
+        for i in range(200):
+            x, y = get_batch(data, config.model_config.block_size, config.batch_size)
+            x, y = jnp.array(x), jnp.array(y)
+            loss = fast_loss_fn(model, x, y, None)
+            tot_loss = tot_loss + loss
+        return tot_loss / 200
 
     return step, evaluate
 
 
 @dataclass
 class ExperimentConfig:
-    dataset: str
+    data_dir: str
     learning_rate: float
     batch_size: int
     warmup_steps: int
@@ -85,9 +71,8 @@ class ExperimentConfig:
 
 def train(config):
     print(config)
-    data_dir = os.path.join('data', config.dataset)
-    train_data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
-    val_data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+    train_data = np.memmap(os.path.join(config.data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+    val_data = np.memmap(os.path.join(config.data_dir, 'val.bin'), dtype=np.uint16, mode='r')
     key = jrandom.PRNGKey(0)
     key, key1 = jrandom.split(key)
     model = GPT(config.model_config, key1)
@@ -109,14 +94,14 @@ def train(config):
     postfix_values = {}
     for i in pbar:
         if i % config.eval_interval == 0:
-            key, key1, key2 = jrandom.split(key, 3)
-            train_loss = evaluate(model, train_data, key1)
-            val_loss = evaluate(model, val_data, key2)
+            train_loss = evaluate(model, train_data)
+            val_loss = evaluate(model, val_data)
             postfix_values['train_loss'] = train_loss.item()
             postfix_values['val_loss'] = val_loss.item()
-        key, key1, key2 = jrandom.split(key, 3)
-        x, y = get_batch(train_data, config.model_config.block_size, config.batch_size, key1)
-        loss, model, opt_state = step(model, opt_state, x, y, key2)
+        key, key1 = jrandom.split(key)
+        x, y = get_batch(train_data, config.model_config.block_size, config.batch_size)
+        x, y = jnp.array(x), jnp.array(y)
+        loss, model, opt_state = step(model, opt_state, x, y, key1)
         postfix_values['loss'] = loss.item()
         postfix_values['lr'] = scheduler(i).item()
         pbar.set_postfix(**postfix_values)
