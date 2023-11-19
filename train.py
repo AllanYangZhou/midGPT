@@ -83,7 +83,7 @@ def main():
         optax.scale_by_adam(b2=config.beta2),
         optax.add_decayed_weights(config.weight_decay),
         optax.scale_by_schedule(scheduler),
-        optax.adamw(config.learning_rate, b2=config.beta2, weight_decay=config.weight_decay),
+        optax.scale(-1),
     )
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
 
