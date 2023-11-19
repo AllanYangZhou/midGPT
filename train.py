@@ -28,6 +28,12 @@ class ExperimentConfig:
     dataset: str = 'shakespeare_char'
     learning_rate: float = 1e-3
     batch_size: int = 64
+    warmup_steps: int = 100
+    min_lr: float = 1e-4
+    lr_decay_steps: int = 5000
+    max_steps: int = 5000
+    beta2: float = 0.99
+    weight_decay: float = 0.1
     model_config: GPTConfig = field(init=False)
 
     def __post_init__(self):
@@ -70,14 +76,22 @@ def main():
     key, key1 = jrandom.split(key)
     model = GPT(config.model_config, key1)
 
-    optimizer = optax.adamw(config.learning_rate)
+    scheduler = optax.warmup_cosine_decay_schedule(
+        0, config.learning_rate, config.warmup_steps,
+        config.lr_decay_steps, end_value=config.min_lr)
+    optimizer = optax.chain(
+        optax.scale_by_adam(b2=config.beta2),
+        optax.add_decayed_weights(config.weight_decay),
+        optax.scale_by_schedule(scheduler),
+        optax.adamw(config.learning_rate, b2=config.beta2, weight_decay=config.weight_decay),
+    )
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
 
-    for _ in range(100):
+    for i in range(config.max_steps):
         key, key1, key2 = jrandom.split(key, 3)
         x, y = get_batch(train_data, config.model_config.block_size, config.batch_size, key1)
         loss, model, opt_state = step(model, optimizer, opt_state, x, y, key2)
-        print(loss.item())
+        print(f"step {i}: lr: {scheduler(i)} loss={loss.item():.3f}")
 
 
 if __name__ == '__main__':
