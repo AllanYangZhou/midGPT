@@ -1,12 +1,12 @@
-from functools import partial
 from dataclasses import dataclass
 import math
 import typing as tp
 import equinox as eqx
 import jax
-from jax import vmap
 import jax.numpy as jnp
 import jax.random as jrandom
+
+vmap = jax.vmap
 
 
 def reinit_linear(layer: eqx.nn.Linear, key, w_std=0.02):
@@ -67,7 +67,10 @@ class CausalSelfAttention(eqx.Module):
         # Causal mask
         idx_x, idx_y = jnp.triu_indices(T, 1)
         att = att.at[..., idx_x, idx_y].set(float('-inf'))
-        att = jax.nn.softmax(att / jnp.sqrt(n_per_head), axis=-1)
+        # Softmax should be in full precision.
+        orig_dtype = att.dtype
+        att = jax.nn.softmax(att.astype(jnp.float32) / jnp.sqrt(n_per_head), axis=-1)
+        att = att.astype(orig_dtype)
         att = self.attn_dropout(att, inference=inference, key=attndrop_key)
         out = jnp.reshape(jnp.transpose(att @ v, (1, 0, 2)), (T, C))
         out = self.resid_dropout(vmap(self.c_proj)(out), inference=inference, key=projdrop_key)
@@ -96,7 +99,7 @@ class Block(eqx.Module):
             mlp_key = jrandom.split(mlp_key, x.shape[0])
         ln1, ln2 = vmap(self.ln1), vmap(self.ln2)
         x = x + self.attn(ln1(x), inference=inference, key=attn_key)
-        return x + vmap(partial(self.mlp, inference=inference))(ln2(x), key=mlp_key)
+        return x + vmap(eqx.Partial(self.mlp, inference=inference))(ln2(x), key=mlp_key)
 
 
 @dataclass
