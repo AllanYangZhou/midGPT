@@ -1,5 +1,5 @@
---find-links https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
-jax[cuda11_pip]==0.4.20
+# --find-links https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+# jax[cuda11_pip]==0.4.20
 equinox==0.11.2
 tiktoken==0.5.1
 optax==0.1.7
