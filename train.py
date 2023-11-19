@@ -1,3 +1,5 @@
+import typing as tp
+from functools import partial
 from dataclasses import dataclass, field
 import os
 import pickle
@@ -5,10 +7,13 @@ import equinox as eqx
 import jax
 import jax.random as jrandom
 import jax.numpy as jnp
-from jax import vmap
+from jax.lax import scan
 import optax
 import numpy as np
 from model import GPT, GPTConfig
+
+PRNGKey = jax.random.PRNGKey
+vmap = jax.vmap
 
 
 def get_vocab_size(data_dir):
@@ -34,6 +39,7 @@ class ExperimentConfig:
     max_steps: int = 5000
     beta2: float = 0.99
     weight_decay: float = 0.1
+    eval_interval: int = 2000
     model_config: GPTConfig = field(init=False)
 
     def __post_init__(self):
@@ -44,7 +50,7 @@ class ExperimentConfig:
         )
 
 
-def get_batch(data, block_size, batch_size, key):
+def get_batch(data, block_size, batch_size, key: PRNGKey):
     ix = jrandom.randint(key, (batch_size,), 0, len(data) - block_size)
     x = jnp.take(data, np.arange(block_size) + ix[:, None], axis=0).astype(np.int32)
     y = jnp.take(data, np.arange(1, block_size + 1) + ix[:, None], axis=0).astype(np.int32)
@@ -52,18 +58,32 @@ def get_batch(data, block_size, batch_size, key):
 
 
 
-def loss_fn(model, x, y, key):
-    logits = vmap(model)(x, jrandom.split(key, x.shape[0]))
+def loss_fn(model, x, y, key: tp.Optional[PRNGKey]):
+    if key is not None:
+        key = jrandom.split(key, x.shape[0])
+    logits = vmap(model)(x, key=key)
     loss = optax.softmax_cross_entropy_with_integer_labels(logits, y)
     return loss.mean()
 
 
 @eqx.filter_jit
-def step(model, optimizer, opt_state, x, y, key):
+def step(model, optimizer, opt_state, x, y, key: PRNGKey):
     loss, grad = eqx.filter_value_and_grad(loss_fn)(model, x, y, key)
     updates, opt_state = optimizer.update(grad, opt_state, model)
     model = eqx.apply_updates(model, updates)
     return loss, model, opt_state
+
+
+def evaluate(model, data, block_size, batch_size, key: PRNGKey):
+    model = partial(model, inference=True)
+    def _helper(loss_so_far, key):
+        x, y = get_batch(data, block_size, batch_size, key)
+        loss = loss_fn(model, x, y, None)
+        return loss_so_far + loss, None
+    tot_loss = jnp.zeros(())
+    keys = jrandom.split(key, 200)
+    losses, _ = scan(_helper, tot_loss, keys)
+    return losses / keys.shape[0]
 
 
 def main():
@@ -88,6 +108,11 @@ def main():
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
 
     for i in range(config.max_steps):
+        if i % config.eval_interval == 0:
+            key, key1, key2 = jrandom.split(key, 3)
+            train_loss = evaluate(model, train_data, config.model_config.block_size, config.batch_size, key1)
+            val_loss = evaluate(model, val_data, config.model_config.block_size, config.batch_size, key2)
+            print(f"Eval at step {i}: train_loss={train_loss.item():.3f} val_loss={val_loss.item():.3f}")
         key, key1, key2 = jrandom.split(key, 3)
         x, y = get_batch(train_data, config.model_config.block_size, config.batch_size, key1)
         loss, model, opt_state = step(model, optimizer, opt_state, x, y, key2)

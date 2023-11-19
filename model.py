@@ -1,3 +1,4 @@
+from functools import partial
 from dataclasses import dataclass
 import math
 import typing as tp
@@ -29,9 +30,9 @@ class MLP(eqx.Module):
             4 * n_embd, n_embd, use_bias=bias, key=key2), key2, w_std=c_proj_std)
         self.dropout = eqx.nn.Dropout(dropout)
 
-    def __call__(self, x, key):
+    def __call__(self, x, inference=False, key=None):
         x = jax.nn.gelu(self.c_fc(x))
-        return self.dropout(self.c_proj(x), key=key)
+        return self.dropout(self.c_proj(x), inference=inference, key=key)
 
 
 class CausalSelfAttention(eqx.Module):
@@ -52,8 +53,8 @@ class CausalSelfAttention(eqx.Module):
         self.attn_dropout = eqx.nn.Dropout(dropout)
         self.resid_dropout = eqx.nn.Dropout(dropout)
 
-    def __call__(self, x, key):
-        key1, key2 = jrandom.split(key)
+    def __call__(self, x, inference=False, key=None):
+        attndrop_key, projdrop_key = jrandom.split(key) if key is not None else (None, None)
         T, C = x.shape
         qkv = vmap(self.c_attn)(x)  # (T, 3 * C)
         q, k, v = jnp.split(qkv, 3, axis=-1)  # (T, C)
@@ -67,9 +68,9 @@ class CausalSelfAttention(eqx.Module):
         idx_x, idx_y = jnp.triu_indices(T, 1)
         att = att.at[..., idx_x, idx_y].set(float('-inf'))
         att = jax.nn.softmax(att / jnp.sqrt(n_per_head), axis=-1)
-        att = self.attn_dropout(att, key=key1)
+        att = self.attn_dropout(att, inference=inference, key=attndrop_key)
         out = jnp.reshape(jnp.transpose(att @ v, (1, 0, 2)), (T, C))
-        out = self.resid_dropout(vmap(self.c_proj)(out), key=key2)
+        out = self.resid_dropout(vmap(self.c_proj)(out), inference=inference, key=projdrop_key)
         return out
 
 
@@ -88,12 +89,14 @@ class Block(eqx.Module):
         self.ln1 = eqx.nn.LayerNorm(n_embd, eps=1e-5, use_bias=bias)
         self.ln2 = eqx.nn.LayerNorm(n_embd, eps=1e-5, use_bias=bias)
 
-    def __call__(self, x, key):
+    def __call__(self, x, inference=False, key=None):
+        attn_key, mlp_key = (None, None)
+        if key is not None:
+            attn_key, mlp_key = jrandom.split(key)
+            mlp_key = jrandom.split(mlp_key, x.shape[0])
         ln1, ln2 = vmap(self.ln1), vmap(self.ln2)
-        key1, key2 = jrandom.split(key)
-        x = x + self.attn(ln1(x), key1)
-        key2 = jrandom.split(key2, x.shape[0])
-        return x + vmap(self.mlp)(ln2(x), key2)
+        x = x + self.attn(ln1(x), inference=inference, key=attn_key)
+        return x + vmap(partial(self.mlp, inference=inference))(ln2(x), key=mlp_key)
 
 
 @dataclass
@@ -131,13 +134,15 @@ class GPT(eqx.Module):
         self.lm_head = reinit_linear(eqx.nn.Linear(
             config.n_embd, config.vocab_size, use_bias=config.bias, key=key4), key4)
 
-    def __call__(self, x, key):  # (T, vocab_size)
-        key, key1 = jrandom.split(key)
+    def __call__(self, x, inference=False, key=None):  # (T, vocab_size)
+        drop_key, block_keys = None, (None,) * len(self.blocks)
+        if key is not None:
+            drop_key, block_keys = jrandom.split(key)
+            block_keys = jrandom.split(block_keys, len(self.blocks))
         x = vmap(self.wte)(x) + vmap(self.wpe)(jnp.arange(x.shape[0]))
-        x = self.drop(x, key=key1)
-        keys = jrandom.split(key, len(self.blocks))
-        for subkey, block in zip(keys, self.blocks):
-            x = block(x, subkey)
+        x = self.drop(x, inference=inference, key=drop_key)
+        for block_key, block in zip(block_keys, self.blocks):
+            x = block(x, inference=inference, key=block_key)
         x = vmap(self.ln_f)(x)
         logits = vmap(self.lm_head)(x)
         return logits  # (T, vocab_size)
