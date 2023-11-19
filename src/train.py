@@ -10,7 +10,7 @@ import jmp
 import optax
 import numpy as np
 from tqdm import tqdm
-from model import GPT, GPTConfig
+from .model import GPT, GPTConfig
 
 PRNGKey = jrandom.PRNGKey
 vmap = jax.vmap
@@ -27,31 +27,6 @@ def get_vocab_size(data_dir):
     if vocab_size is None:
         vocab_size = 50304
     return vocab_size
-
-
-@dataclass
-class ExperimentConfig:
-    dataset: str = 'shakespeare_char'
-    learning_rate: float = 1e-3
-    batch_size: int = 64
-    warmup_steps: int = 100
-    min_lr: float = 1e-4
-    lr_decay_steps: int = 5000
-    max_steps: int = 5000
-    beta2: float = 0.99
-    weight_decay: float = 0.1
-    eval_interval: int = 2000
-    # Need an A40/A100 to natively support bfloat16.
-    # policy: jmp.Policy = jmp.get_policy("params=float32,compute=bfloat16,output=bfloat16")
-    policy: jmp.Policy = jmp.get_policy("params=float32,compute=float32,output=float32")
-    model_config: GPTConfig = field(init=False)
-
-    def __post_init__(self):
-        vocab_size = get_vocab_size(os.path.join('data', self.dataset))
-        self.model_config = GPTConfig(
-            block_size=256, vocab_size=vocab_size, n_layer=6, n_head=6,
-            n_embd=384, dropout=0.2, bias=False,
-        )
 
 
 def get_batch(data, block_size, batch_size, key: PRNGKey):
@@ -92,8 +67,23 @@ def make_training_fns(config, optimizer):
     return step, evaluate
 
 
-def main():
-    config = ExperimentConfig()
+@dataclass
+class ExperimentConfig:
+    dataset: str
+    learning_rate: float
+    batch_size: int
+    warmup_steps: int
+    min_lr: float
+    lr_decay_steps: int
+    max_steps: int
+    beta2: float
+    weight_decay: float
+    eval_interval: int
+    policy: jmp.Policy
+    model_config: GPTConfig
+
+
+def train(config):
     print(config)
     data_dir = os.path.join('data', config.dataset)
     train_data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
@@ -131,7 +121,3 @@ def main():
         postfix_values['lr'] = scheduler(i).item()
         pbar.set_postfix(**postfix_values)
     pbar.close()
-
-
-if __name__ == '__main__':
-    main()
