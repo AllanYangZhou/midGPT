@@ -1,5 +1,5 @@
-# NanoGPT EQX
-A simple and hackable repository for training medium-sized (hopefully, even somewhat large) GPTs. Like [NanoGPT](https://github.com/karpathy/nanoGPT/), but using Jax+[Equinox](https://github.com/patrick-kidger/equinox) instead of PyTorch. 
+# midGPT
+A simple and hackable repository for training mid-sized GPTs (language models).  Built using Jax+[Equinox](https://github.com/patrick-kidger/equinox). Directly inspired by [NanoGPT](https://github.com/karpathy/nanoGPT/).
 
 Model code is in `src/model.py`, training code is in `src/train.py`. Experiments are configured and launched by `train_<dset>.py` scripts (e.g., `train_owt.py`).
 

@@ -2,3 +2,6 @@ data/**/*.txt
 data/**/*.pkl
 data/**/*.bin
 __pycache__
+launch.py
+slurm_*.sh
+*.out
