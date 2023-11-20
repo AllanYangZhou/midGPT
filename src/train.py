@@ -25,8 +25,9 @@ def get_batch(data, block_size, batch_size):
 
 
 def make_training_fns(config, optimizer):
+    policy = jmp.get_policy(config.policy)
     def loss_fn(model, x, y, key: tp.Optional[PRNGKey]):
-        model = config.policy.cast_to_compute(model)
+        model = policy.cast_to_compute(model)
         if key is not None:
             key = jrandom.split(key, x.shape[0])
         logits = vmap(model)(x, key=key)
@@ -67,7 +68,7 @@ class ExperimentConfig:
     beta2: float
     weight_decay: float
     eval_interval: int
-    policy: jmp.Policy
+    policy: str
     model_config: GPTConfig
 
 

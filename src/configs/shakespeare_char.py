@@ -1,4 +1,3 @@
-import jmp
 from src.train import ExperimentConfig
 from src.model import GPTConfig
 
@@ -14,7 +13,7 @@ config = ExperimentConfig(
     beta2=0.99,
     weight_decay=0.1,
     eval_interval=2000,
-    policy=jmp.get_policy("params=float32,compute=float32,output=float32"),
+    policy='params=float32,compute=float32,output=float32',
     model_config=GPTConfig(
         block_size=256, vocab_size=65, n_layer=6, n_head=6,
         n_embd=384, dropout=0.2, bias=False,

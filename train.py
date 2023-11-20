@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 from datetime import datetime
 from src.train import train
@@ -17,7 +18,7 @@ if cmd_args.rundir is not None:
 else:
     config.rundir = os.path.join(
         'outputs', datetime.now().strftime('%Y-%m-%d-%H-%M-%S'))
+print(f"Writing to {config.rundir}")
 # make sure the directory exists
 os.makedirs(config.rundir, exist_ok=True)
-print(f"Writing to {config.rundir}")
 train(config)
