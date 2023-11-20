@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import os
 import equinox as eqx
 import jax
+from jax.experimental import mesh_utils
 import jmp
 import optax
 import numpy as np
@@ -10,7 +11,8 @@ from tqdm import tqdm
 from .model import GPT, GPTConfig
 
 jnp, jrandom, vmap, scan = jax.numpy, jax.random, jax.vmap, jax.lax.scan
-PRNGKey = jrandom.PRNGKey
+P, PRNGKey = jax.sharding.PartitionSpec, jax.random.PRNGKey
+NamedSharding = jax.sharding.NamedSharding
 
 
 def get_batch(data, block_size, batch_size):
@@ -37,12 +39,12 @@ def make_training_fns(config, optimizer):
         return loss, model, opt_state
 
     fast_loss_fn = eqx.filter_jit(loss_fn)
-    def evaluate(model, data):
+    def evaluate(model, data, data_sharding):
         model = eqx.Partial(model, inference=True)
         tot_loss = jnp.zeros(())
         for i in range(200):
             x, y = get_batch(data, config.model_config.block_size, config.batch_size)
-            x, y = jnp.array(x), jnp.array(y)
+            x, y = jax.device_put((jnp.array(x), jnp.array(y)), data_sharding)
             loss = fast_loss_fn(model, x, y, None)
             tot_loss = tot_loss + loss
         return tot_loss / 200
@@ -67,6 +69,9 @@ class ExperimentConfig:
 
 
 def train(config):
+    n_devices = len(jax.devices())
+    mesh = jax.sharding.Mesh(mesh_utils.create_device_mesh((n_devices,)), axis_names=('batch',))
+
     print(config)
     train_data = np.memmap(os.path.join(config.data_dir, 'train.bin'), dtype=np.uint16, mode='r')
     val_data = np.memmap(os.path.join(config.data_dir, 'val.bin'), dtype=np.uint16, mode='r')
@@ -87,17 +92,18 @@ def train(config):
 
     step, evaluate = make_training_fns(config, optimizer)
 
+    data_sharding = NamedSharding(mesh, P('batch', None))
     pbar = tqdm(range(config.max_steps))
     postfix_values = {}
     for i in pbar:
         if i % config.eval_interval == 0:
-            train_loss = evaluate(model, train_data)
-            val_loss = evaluate(model, val_data)
+            train_loss = evaluate(model, train_data, data_sharding)
+            val_loss = evaluate(model, val_data, data_sharding)
             postfix_values['train_loss'] = train_loss.item()
             postfix_values['val_loss'] = val_loss.item()
         key, key1 = jrandom.split(key)
         x, y = get_batch(train_data, config.model_config.block_size, config.batch_size)
-        x, y = jnp.array(x), jnp.array(y)
+        x, y = jax.device_put((jnp.array(x), jnp.array(y)), data_sharding)
         loss, model, opt_state = step(model, opt_state, x, y, key1)
         postfix_values['loss'] = loss.item()
         postfix_values['lr'] = scheduler(i).item()
