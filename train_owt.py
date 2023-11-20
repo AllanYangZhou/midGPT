@@ -1,9 +1,13 @@
+import argparse
+import os
+from datetime import datetime
 from src.train import ExperimentConfig, train
 from src.model import GPTConfig
 import jmp
 
 
 config = ExperimentConfig(
+    rundir='',
     data_dir='/scr/ayz/nano/openwebtext',
     learning_rate=6e-4,
     # Ideal effective batch size: 480
@@ -22,4 +26,14 @@ config = ExperimentConfig(
     )
 )
 
+parser = argparse.ArgumentParser()
+parser.add_argument('--rundir', type=str)
+cmd_args = parser.parse_args()
+if cmd_args.rundir is not None:
+    config.rundir = cmd_args.rundir
+else:
+    config.rundir = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+# make sure the directory exists
+os.makedirs(config.rundir, exist_ok=True)
+print(f"Writing to {config.rundir}")
 train(config)

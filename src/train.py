@@ -1,3 +1,5 @@
+import csv
+import time
 import typing as tp
 from dataclasses import dataclass
 import os
@@ -54,6 +56,7 @@ def make_training_fns(config, optimizer):
 
 @dataclass
 class ExperimentConfig:
+    rundir: str
     data_dir: str
     learning_rate: float
     batch_size: int
@@ -91,11 +94,19 @@ def shard_gpt(model, mesh):
     return model
 
 
+def log_metric(filename, step, metric_type, value):
+    with open(filename, mode='a', newline='') as file:
+        writer = csv.writer(file)
+        timestamp = int(time.time())
+        writer.writerow([timestamp, step, metric_type, value])
+
+
 def train(config):
+    eqx.tree_pprint(config)
     n_devices = len(jax.devices())
+    print(f"Using {n_devices} devices.")
     mesh = jax.sharding.Mesh(mesh_utils.create_device_mesh((n_devices,)), axis_names=('data',))
 
-    print(config)
     train_data = np.memmap(os.path.join(config.data_dir, 'train.bin'), dtype=np.uint16, mode='r')
     val_data = np.memmap(os.path.join(config.data_dir, 'val.bin'), dtype=np.uint16, mode='r')
     key = jrandom.PRNGKey(0)
@@ -113,18 +124,24 @@ def train(config):
         optax.scale(-1),
     )
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
-
     step, evaluate = make_training_fns(config, optimizer)
 
     data_sharding = NamedSharding(mesh, P('data', None))
     pbar = tqdm(range(config.max_steps))
     postfix_values = {}
+    metrics_path = os.path.join(config.rundir, 'metrics.csv')
+    # Initialize the metrics CSV
+    with open(metrics_path, mode='w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(["Unix Timestamp", "Step", "Metric", "Value"])
     for i in pbar:
         if i % config.eval_interval == 0:
-            train_loss = evaluate(model, train_data, data_sharding)
-            val_loss = evaluate(model, val_data, data_sharding)
-            postfix_values['train_loss'] = train_loss.item()
-            postfix_values['val_loss'] = val_loss.item()
+            train_loss = evaluate(model, train_data, data_sharding).item()
+            val_loss = evaluate(model, val_data, data_sharding).item()
+            postfix_values['train_loss'] = train_loss
+            postfix_values['val_loss'] = val_loss
+            log_metric(metrics_path, i, 'train_loss', train_loss)
+            log_metric(metrics_path, i, 'val_loss', val_loss)
         key, key1 = jrandom.split(key)
         x, y = get_batch(train_data, config.model_config.block_size, config.batch_size)
         x, y = jax.device_put((jnp.array(x), jnp.array(y)), data_sharding)
