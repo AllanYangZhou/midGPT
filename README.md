@@ -16,7 +16,7 @@ python train_owt.py  # openwebtext
  - [x] Basic training on OWT
  - [x] Mixed precision
  - [x] Data parallel training
- - [ ] FSDP
+ - [x] FSDP
  - [ ] Grad accumulation
  - [ ] Checkpointing and resuming
  - [ ] Logging
