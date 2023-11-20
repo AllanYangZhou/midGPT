@@ -19,7 +19,7 @@ python launch.py --config=openwebtext
  - [x] FSDP
  - [x] Checkpointing and resuming
  - [x] Logging
- - [ ] Grad accumulation
+ - [x] Grad accumulation
 
 
 ## Debugging

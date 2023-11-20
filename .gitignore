@@ -5,4 +5,4 @@ __pycache__
 _launch.py
 slurm_*.sh
 *.out
-outputs/
+outputs

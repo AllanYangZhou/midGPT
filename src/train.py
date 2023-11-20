@@ -70,6 +70,7 @@ class ExperimentConfig:
     weight_decay: float
     eval_interval: int
     policy: str
+    g_accum_steps: int
     model_config: GPTConfig
 
 
@@ -77,6 +78,10 @@ def get_layers(model, layer_cls):
     """Get all layers of model matching layer_cls."""
     matches_cls = lambda x: isinstance(x, layer_cls)
     return filter(lambda x: matches_cls(x), jtu.tree_leaves(model, is_leaf=matches_cls))
+
+
+def count_params(model):
+    return sum([jnp.size(x) for x in jtu.tree_leaves(model) if isinstance(x, jax.Array)])
 
 
 def shard_gpt(model, mesh):
@@ -92,7 +97,7 @@ def shard_gpt(model, mesh):
     model = eqx.tree_at(get_ln_wts, model, sharded_ln_wts)
 
     n_wts = len([x for x in jtu.tree_leaves(model) if isinstance(x, jax.Array)])
-    assert n_wts == len(sharded_lin_wts) + len(sharded_ln_wts), "Some parameters are not being sharded!"
+    assert n_wts == len(sharded_lin_wts) + len(sharded_ln_wts), 'Some parameters are not being sharded!'
     return model
 
 
@@ -120,20 +125,23 @@ def train(config):
         ocp.PyTreeCheckpointer(),
         options=options)
 
+    # Under grad accum, scheduler is only updated every g_accum_steps
+    warmup_steps = config.warmup_steps // config.g_accum_steps
+    lr_decay_steps = config.lr_decay_steps // config.g_accum_steps
     scheduler = optax.warmup_cosine_decay_schedule(
-        0, config.learning_rate, config.warmup_steps,
-        config.lr_decay_steps, end_value=config.min_lr)
-    optimizer = optax.chain(
+        0, config.learning_rate, warmup_steps, lr_decay_steps, end_value=config.min_lr)
+    optimizer = optax.MultiSteps(optax.chain(
         optax.scale_by_adam(b2=config.beta2),
         optax.add_decayed_weights(config.weight_decay),
         optax.scale_by_schedule(scheduler),
         optax.scale(-1),
-    )
+    ), every_k_schedule=config.g_accum_steps)
     step, evaluate = make_training_fns(config, optimizer)
 
     key = jrandom.PRNGKey(0)
     key, key1 = jrandom.split(key)
     model = GPT(config.model_config, key1)
+    print(f'Model has {count_params(model)} parameters.')
     model = shard_gpt(model, mesh)
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
     first_step = 0
@@ -146,7 +154,7 @@ def train(config):
         # Initialize the metrics CSV
         with open(metrics_path, mode='w', newline='') as file:
             writer = csv.writer(file)
-            writer.writerow(["Unix Timestamp", "Step", "Metric", "Value"])
+            writer.writerow(['Unix Timestamp', 'Step', 'Metric', 'Value'])
     data_sharding = NamedSharding(mesh, P('data', None))
     postfix_values = {}
     pbar = trange(first_step, config.max_steps, initial=first_step, total=config.max_steps)
@@ -164,6 +172,6 @@ def train(config):
         loss, model, opt_state = step(model, opt_state, x, y, key1)
         mngr.save(i, (jtu.tree_leaves(model), jtu.tree_leaves(opt_state)))
         postfix_values['loss'] = loss.item()
-        postfix_values['lr'] = scheduler(i).item()
+        postfix_values['lr'] = scheduler(opt_state.inner_opt_state[2].count).item()
         pbar.set_postfix(**postfix_values)
     pbar.close()

@@ -18,7 +18,7 @@ if cmd_args.rundir is not None:
 else:
     config.rundir = os.path.join(
         'outputs', datetime.now().strftime('%Y-%m-%d-%H-%M-%S'))
-print(f"Writing to {config.rundir}")
+print(f'Writing to {config.rundir}')
 # make sure the directory exists
 os.makedirs(config.rundir, exist_ok=True)
 # TODO: save config to file
