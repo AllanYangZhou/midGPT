@@ -17,9 +17,9 @@ python train.py --config=openwebtext
  - [x] Mixed precision
  - [x] Data parallel training
  - [x] FSDP
- - [ ] Grad accumulation
- - [ ] Checkpointing and resuming
+ - [x] Checkpointing and resuming
  - [x] Logging
+ - [ ] Grad accumulation
 
 
 ## Debugging

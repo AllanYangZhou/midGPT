@@ -21,4 +21,5 @@ else:
 print(f"Writing to {config.rundir}")
 # make sure the directory exists
 os.makedirs(config.rundir, exist_ok=True)
+# TODO: save config to file
 train(config)

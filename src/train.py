@@ -8,8 +8,9 @@ import jax
 from jax.experimental import mesh_utils
 import jmp
 import optax
+import orbax.checkpoint as ocp
 import numpy as np
-from tqdm import tqdm
+from tqdm import trange
 from .model import GPT, GPTConfig
 
 jnp, jrandom, vmap, scan = jax.numpy, jax.random, jax.vmap, jax.lax.scan
@@ -110,10 +111,14 @@ def train(config):
 
     train_data = np.memmap(os.path.join(config.data_dir, 'train.bin'), dtype=np.uint16, mode='r')
     val_data = np.memmap(os.path.join(config.data_dir, 'val.bin'), dtype=np.uint16, mode='r')
-    key = jrandom.PRNGKey(0)
-    key, key1 = jrandom.split(key)
-    model = GPT(config.model_config, key1)
-    model = shard_gpt(model, mesh)
+    metrics_path = os.path.join(config.rundir, 'metrics.csv')
+
+    options = ocp.CheckpointManagerOptions(
+        max_to_keep=1, save_interval_steps=config.eval_interval)
+    mngr = ocp.CheckpointManager(
+        os.path.abspath(os.path.join(config.rundir, 'ckpt_mngr')),
+        ocp.PyTreeCheckpointer(),
+        options=options)
 
     scheduler = optax.warmup_cosine_decay_schedule(
         0, config.learning_rate, config.warmup_steps,
@@ -124,17 +129,27 @@ def train(config):
         optax.scale_by_schedule(scheduler),
         optax.scale(-1),
     )
-    opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
     step, evaluate = make_training_fns(config, optimizer)
 
+    key = jrandom.PRNGKey(0)
+    key, key1 = jrandom.split(key)
+    model = GPT(config.model_config, key1)
+    model = shard_gpt(model, mesh)
+    opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
+    first_step = 0
+    if mngr.latest_step() is not None:
+        model_leaves, opt_state_leaves = mngr.restore(mngr.latest_step())
+        model = jtu.tree_unflatten(jtu.tree_structure(model), model_leaves)
+        opt_state = jtu.tree_unflatten(jtu.tree_structure(opt_state), opt_state_leaves)
+        first_step = mngr.latest_step() + 1
+    else:
+        # Initialize the metrics CSV
+        with open(metrics_path, mode='w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(["Unix Timestamp", "Step", "Metric", "Value"])
     data_sharding = NamedSharding(mesh, P('data', None))
-    pbar = tqdm(range(config.max_steps))
     postfix_values = {}
-    metrics_path = os.path.join(config.rundir, 'metrics.csv')
-    # Initialize the metrics CSV
-    with open(metrics_path, mode='w', newline='') as file:
-        writer = csv.writer(file)
-        writer.writerow(["Unix Timestamp", "Step", "Metric", "Value"])
+    pbar = trange(first_step, config.max_steps, initial=first_step, total=config.max_steps)
     for i in pbar:
         if i % config.eval_interval == 0:
             train_loss = evaluate(model, train_data, data_sharding).item()
@@ -147,6 +162,7 @@ def train(config):
         x, y = get_batch(train_data, config.model_config.block_size, config.batch_size)
         x, y = jax.device_put((jnp.array(x), jnp.array(y)), data_sharding)
         loss, model, opt_state = step(model, opt_state, x, y, key1)
+        mngr.save(i, (jtu.tree_leaves(model), jtu.tree_leaves(opt_state)))
         postfix_values['loss'] = loss.item()
         postfix_values['lr'] = scheduler(i).item()
         pbar.set_postfix(**postfix_values)
