@@ -7,8 +7,8 @@ Model code is in `src/model.py`, training code is in `src/train.py`. Experiments
 From a fresh virtualenv, install Jax according to their [instructions](https://jax.readthedocs.io/en/latest/installation.html), then `pip install -r requirements.txt`. Tested on Python 3.11.0, but Python 3.9+ probably works.
 
 ```bash
-python train.py  --config=shakespeare_char
-python train.py --config=openwebtext
+python launch.py  --config=shakespeare_char
+python launch.py --config=openwebtext
 ```
 
 ## Feature list

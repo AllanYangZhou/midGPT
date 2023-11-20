@@ -2,7 +2,7 @@ data/**/*.txt
 data/**/*.pkl
 data/**/*.bin
 __pycache__
-launch.py
+_launch.py
 slurm_*.sh
 *.out
 outputs/
