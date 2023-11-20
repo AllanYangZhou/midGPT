@@ -12,7 +12,7 @@ from .model import GPT, GPTConfig
 
 jnp, jrandom, vmap, scan = jax.numpy, jax.random, jax.vmap, jax.lax.scan
 P, PRNGKey = jax.sharding.PartitionSpec, jax.random.PRNGKey
-NamedSharding = jax.sharding.NamedSharding
+jtu, NamedSharding = jax.tree_util, jax.sharding.NamedSharding
 
 
 def get_batch(data, block_size, batch_size):
@@ -68,9 +68,32 @@ class ExperimentConfig:
     model_config: GPTConfig
 
 
+def get_layers(model, layer_cls):
+    """Get all layers of model matching layer_cls."""
+    matches_cls = lambda x: isinstance(x, layer_cls)
+    return filter(lambda x: matches_cls(x), jtu.tree_leaves(model, is_leaf=matches_cls))
+
+
+def shard_gpt(model, mesh):
+    """FSDP model parameter sharding. Assumes bias=False."""
+    lin_sharding = NamedSharding(mesh, P(None, 'data'))
+    get_lin_wts = lambda m: [l.weight for l in get_layers(m, (eqx.nn.Linear, eqx.nn.Embedding))]
+    sharded_lin_wts = [jax.device_put(w, lin_sharding) for w in get_lin_wts(model)]
+    model = eqx.tree_at(get_lin_wts, model, sharded_lin_wts)
+
+    ln_sharding = NamedSharding(mesh, P('data',))
+    get_ln_wts = lambda m: [l.weight for l in get_layers(m, eqx.nn.LayerNorm)]
+    sharded_ln_wts = [jax.device_put(w, ln_sharding) for w in get_ln_wts(model)]
+    model = eqx.tree_at(get_ln_wts, model, sharded_ln_wts)
+
+    n_wts = len([x for x in jtu.tree_leaves(model) if isinstance(x, jax.Array)])
+    assert n_wts == len(sharded_lin_wts) + len(sharded_ln_wts), "Some parameters are not being sharded!"
+    return model
+
+
 def train(config):
     n_devices = len(jax.devices())
-    mesh = jax.sharding.Mesh(mesh_utils.create_device_mesh((n_devices,)), axis_names=('batch',))
+    mesh = jax.sharding.Mesh(mesh_utils.create_device_mesh((n_devices,)), axis_names=('data',))
 
     print(config)
     train_data = np.memmap(os.path.join(config.data_dir, 'train.bin'), dtype=np.uint16, mode='r')
@@ -78,6 +101,7 @@ def train(config):
     key = jrandom.PRNGKey(0)
     key, key1 = jrandom.split(key)
     model = GPT(config.model_config, key1)
+    model = shard_gpt(model, mesh)
 
     scheduler = optax.warmup_cosine_decay_schedule(
         0, config.learning_rate, config.warmup_steps,
@@ -92,7 +116,7 @@ def train(config):
 
     step, evaluate = make_training_fns(config, optimizer)
 
-    data_sharding = NamedSharding(mesh, P('batch', None))
+    data_sharding = NamedSharding(mesh, P('data', None))
     pbar = tqdm(range(config.max_steps))
     postfix_values = {}
     for i in pbar:

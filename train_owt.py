@@ -6,7 +6,8 @@ import jmp
 config = ExperimentConfig(
     data_dir='/scr/ayz/nano/openwebtext',
     learning_rate=6e-4,
-    batch_size=12,
+    # Ideal effective batch size: 480
+    batch_size=120,
     warmup_steps=2000,
     min_lr=6e-5,
     lr_decay_steps=600_000,
