@@ -1,4 +1,5 @@
 import csv
+from functools import partial
 import time
 import typing as tp
 from dataclasses import dataclass
@@ -12,6 +13,9 @@ import orbax.checkpoint as ocp
 import numpy as np
 from tqdm import trange
 from .model import GPT, GPTConfig
+
+jax.config.update("jax_threefry_partitionable", True)
+
 
 jnp, jrandom, vmap, scan = jax.numpy, jax.random, jax.vmap, jax.lax.scan
 P, PRNGKey = jax.sharding.PartitionSpec, jax.random.PRNGKey
@@ -35,7 +39,7 @@ def make_training_fns(config, optimizer, mesh, shard_model: bool):
         loss = optax.softmax_cross_entropy_with_integer_labels(logits, y)
         return loss.mean()
 
-    @eqx.filter_jit
+    @partial(eqx.filter_jit, donate='all')
     def step(model, opt_state, x, y, key: PRNGKey):
         model_half = policy.cast_to_compute(model)
         loss, grad = eqx.filter_value_and_grad(loss_fn)(model_half, x, y, key)
@@ -43,7 +47,7 @@ def make_training_fns(config, optimizer, mesh, shard_model: bool):
         grad = policy.cast_to_param(grad)
         updates, opt_state = optimizer.update(grad, opt_state, model)
         model = eqx.apply_updates(model, updates)
-        return loss, model, opt_state
+        return model, opt_state, loss
 
     data_sharding = NamedSharding(mesh, P('data', None))
     fast_loss_fn = eqx.filter_jit(loss_fn)
@@ -186,7 +190,7 @@ def train(config):
         key, key1 = jrandom.split(key)
         x, y = get_batch(train_data, config.model_config.block_size, config.batch_size)
         x, y = jax.device_put((jnp.array(x), jnp.array(y)), data_sharding)
-        loss, model, opt_state = step(model, opt_state, x, y, key1)
+        model, opt_state, loss = step(model, opt_state, x, y, key1)
         mngr.save(i, (jtu.tree_leaves(model), jtu.tree_leaves(opt_state)))
         postfix_values['loss'] = loss.item()
         postfix_values['lr'] = scheduler(opt_state.inner_opt_state[2].count).item()
