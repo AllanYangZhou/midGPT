@@ -13,7 +13,7 @@ config = ExperimentConfig(
     beta2=0.99,
     weight_decay=0.1,
     eval_interval=2000,
-    policy='params=float32,compute=float32,output=float32',
+    policy='params=float32,compute=bfloat16,output=bfloat16',
     g_accum_steps=1,
     shard_model=False,
     model_config=GPTConfig(

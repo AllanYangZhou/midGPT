@@ -29,7 +29,6 @@ def get_batch(data, block_size, batch_size):
 def make_training_fns(config, optimizer, mesh, shard_model: bool):
     policy = jmp.get_policy(config.policy)
     def loss_fn(model, x, y, key: tp.Optional[PRNGKey]):
-        model = policy.cast_to_compute(model)
         if key is not None:
             key = jrandom.split(key, x.shape[0])
         logits = vmap(model)(x, key=key)
@@ -38,8 +37,10 @@ def make_training_fns(config, optimizer, mesh, shard_model: bool):
 
     @eqx.filter_jit
     def step(model, opt_state, x, y, key: PRNGKey):
-        loss, grad = eqx.filter_value_and_grad(loss_fn)(model, x, y, key)
+        model_half = policy.cast_to_compute(model)
+        loss, grad = eqx.filter_value_and_grad(loss_fn)(model_half, x, y, key)
         grad = shard_gpt(grad, mesh, shard_model, sharding_fn=with_sharding_constraint)
+        grad = policy.cast_to_param(grad)
         updates, opt_state = optimizer.update(grad, opt_state, model)
         model = eqx.apply_updates(model, updates)
         return loss, model, opt_state
@@ -47,6 +48,7 @@ def make_training_fns(config, optimizer, mesh, shard_model: bool):
     data_sharding = NamedSharding(mesh, P('data', None))
     fast_loss_fn = eqx.filter_jit(loss_fn)
     def evaluate(model, data):
+        model = policy.cast_to_compute(model)
         model = eqx.Partial(model, inference=True)
         tot_loss = jnp.zeros(())
         for i in range(200):
@@ -146,11 +148,16 @@ def train(config):
     ), every_k_schedule=config.g_accum_steps)
     step, evaluate = make_training_fns(config, optimizer, mesh, config.shard_model)
 
+    @eqx.filter_jit
+    def init_model(model_key):
+        # Need this helper fn to avoid ever instantiating model unsharded.
+        model = GPT(config.model_config, model_key)
+        return shard_gpt(model, mesh, config.shard_model, sharding_fn=with_sharding_constraint)
+
     key = jrandom.PRNGKey(0)
     key, key1 = jrandom.split(key)
-    model = GPT(config.model_config, key1)
+    model = init_model(key1)
     print(f'Model has {count_params(model)} parameters.')
-    model = shard_gpt(model, mesh, config.shard_model)
     jax.debug.visualize_array_sharding(model.lm_head.weight)
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
     jax.debug.visualize_array_sharding(opt_state.inner_opt_state[0].mu.lm_head.weight)
