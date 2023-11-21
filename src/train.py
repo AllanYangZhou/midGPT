@@ -143,17 +143,16 @@ def train(config):
         ocp.PyTreeCheckpointer(),
         options=options)
 
-    # Under grad accum, scheduler is only updated every g_accum_steps
-    warmup_steps = config.warmup_steps // config.g_accum_steps
-    lr_decay_steps = config.lr_decay_steps // config.g_accum_steps
     scheduler = optax.warmup_cosine_decay_schedule(
-        0, config.learning_rate, warmup_steps, lr_decay_steps, end_value=config.min_lr)
-    optimizer = optax.MultiSteps(optax.chain(
+        0, config.learning_rate, config.warmup_steps, config.lr_decay_steps,
+        end_value=config.min_lr)
+    optimizer = optax.chain(
         optax.scale_by_adam(b2=config.beta2),
         optax.add_decayed_weights(config.weight_decay),
         optax.scale_by_schedule(scheduler),
         optax.scale(-1),
-    ), every_k_schedule=config.g_accum_steps)
+        optax.apply_every(config.g_accum_steps),
+    )
     step, evaluate = make_training_fns(config, optimizer, mesh, config.shard_model)
 
     key = jrandom.PRNGKey(0)
@@ -192,7 +191,7 @@ def train(config):
         model, opt_state, loss = step(model, opt_state, x, y, key1)
         mngr.save(i, (jtu.tree_leaves(model), jtu.tree_leaves(opt_state)))
         postfix_values['loss'] = loss.item()
-        postfix_values['lr'] = scheduler(opt_state.inner_opt_state[2].count).item()
+        postfix_values['lr'] = scheduler(opt_state[2].count).item()
         if pbar.format_dict['rate'] is not None:
             postfix_values['thruput'] = pbar.format_dict['rate'] * config.batch_size
         pbar.set_postfix(**postfix_values)

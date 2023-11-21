@@ -22,7 +22,8 @@ python launch.py --config=openwebtext --rundir=<rundir>
  - [x] Checkpointing and resuming
  - [x] Logging
  - [x] Grad accumulation
- - [ ] Figure out why OOM on j6b with bs=1 on 4xA40
+ - [ ] Reloaded checkpoints seem to use more memory. E.g. `python launch.py --config=openwebtext_xl --rundir=outputs/2023-11-21-01-30-10` OOMs on iris6.
+ - [ ] Can we speed up xl?
 
 
 ## Debugging
