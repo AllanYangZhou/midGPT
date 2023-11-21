@@ -63,7 +63,7 @@ def make_training_fns(config: ExperimentConfig, optimizer, mesh: Mesh, shard_mod
     def step(model: eqx.Module, opt_state, x: Array, y: Array, key: PRNGKey):
         model_half = policy.cast_to_compute(model)
         loss, grad = eqx.filter_value_and_grad(loss_fn)(model_half, x, y, key)
-        grad = shard_gpt(grad, mesh, shard_model, sharding_fn=with_sharding_constraint)
+        grad = shard_gpt(grad, mesh, shard_model)
         grad = policy.cast_to_param(grad)
         updates, opt_state = optimizer.update(grad, opt_state, model)
         model = eqx.apply_updates(model, updates)
@@ -77,7 +77,7 @@ def make_training_fns(config: ExperimentConfig, optimizer, mesh: Mesh, shard_mod
         tot_loss = jnp.zeros(())
         for i in range(200):
             x, y = get_batch(data, config.model_config.block_size, config.batch_size)
-            x, y = jax.device_put((jnp.array(x), jnp.array(y)), data_sharding)
+            x, y = jax.device_put((x, y), data_sharding)
             loss = fast_loss_fn(model, x, y, None)
             tot_loss = tot_loss + loss
         return tot_loss / 200
@@ -96,7 +96,7 @@ def count_params(model: eqx.Module) -> int:
 
 
 def shard_gpt(
-        model: eqx.Module, mesh: Mesh, shard_model: bool, sharding_fn=jax.device_put,
+        model: eqx.Module, mesh: Mesh, shard_model: bool, sharding_fn=with_sharding_constraint
 ) -> eqx.Module:
     """Shard model parameters (or replicate if shard_model is False)."""
     if shard_model:
@@ -124,13 +124,6 @@ def log_metric(filename: str, step: int, metric_type: str, value: float):
         writer = csv.writer(file)
         timestamp = int(time.time())
         writer.writerow([timestamp, step, metric_type, value])
-
-
-@eqx.filter_jit
-def init_sharded_model(config: ExperimentConfig, mesh: Mesh, model_key: PRNGKey) -> eqx.Module:
-    # This function prevents ever initializing the unsharded model.
-    model = GPT(config.model_config, model_key)
-    return shard_gpt(model, mesh, config.shard_model, sharding_fn=with_sharding_constraint)
 
 
 def train(config):
@@ -164,8 +157,12 @@ def train(config):
     step, evaluate = make_training_fns(config, optimizer, mesh, config.shard_model)
 
     key = jrandom.PRNGKey(0)
+    def init_sharded_model(model_key):
+        model = GPT(config.model_config, model_key)
+        return shard_gpt(model, mesh, config.shard_model)
     key, key1 = jrandom.split(key)
-    model = init_sharded_model(key1)
+    # Use jit with sharding constraints to init sharded model.
+    model = eqx.filter_jit(init_sharded_model)(key1)
     print(f'Model has {count_params(model)} parameters.')
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
     first_step = 0
@@ -191,7 +188,7 @@ def train(config):
             log_metric(metrics_path, i, 'val_loss', val_loss)
         key, key1 = jrandom.split(key)
         x, y = get_batch(train_data, config.model_config.block_size, config.batch_size)
-        x, y = jax.device_put((jnp.array(x), jnp.array(y)), data_sharding)
+        x, y = jax.device_put((x, y), data_sharding)
         model, opt_state, loss = step(model, opt_state, x, y, key1)
         mngr.save(i, (jtu.tree_leaves(model), jtu.tree_leaves(opt_state)))
         postfix_values['loss'] = loss.item()
