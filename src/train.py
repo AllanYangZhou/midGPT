@@ -26,7 +26,7 @@ def get_batch(data, block_size, batch_size):
     return x, y
 
 
-def make_training_fns(config, optimizer, mesh):
+def make_training_fns(config, optimizer, mesh, shard_model: bool):
     policy = jmp.get_policy(config.policy)
     def loss_fn(model, x, y, key: tp.Optional[PRNGKey]):
         model = policy.cast_to_compute(model)
@@ -39,7 +39,7 @@ def make_training_fns(config, optimizer, mesh):
     @eqx.filter_jit
     def step(model, opt_state, x, y, key: PRNGKey):
         loss, grad = eqx.filter_value_and_grad(loss_fn)(model, x, y, key)
-        grad = shard_gpt(grad, mesh, sharding_fn=with_sharding_constraint)
+        grad = shard_gpt(grad, mesh, shard_model, sharding_fn=with_sharding_constraint)
         updates, opt_state = optimizer.update(grad, opt_state, model)
         model = eqx.apply_updates(model, updates)
         return loss, model, opt_state
@@ -74,6 +74,7 @@ class ExperimentConfig:
     eval_interval: int
     policy: str
     g_accum_steps: int
+    shard_model: bool
     model_config: GPTConfig
 
 
@@ -87,14 +88,18 @@ def count_params(model):
     return sum([jnp.size(x) for x in jtu.tree_leaves(model) if isinstance(x, jax.Array)])
 
 
-def shard_gpt(model, mesh, sharding_fn=jax.device_put):
+def shard_gpt(model, mesh, shard_model: bool, sharding_fn=jax.device_put):
     """FSDP model parameter sharding. Assumes bias=False."""
-    lin_sharding = NamedSharding(mesh, P(None, 'data'))
+    if shard_model:
+        lin_sharding = NamedSharding(mesh, P(None, 'data'))
+        ln_sharding = NamedSharding(mesh, P('data',))
+    else:
+        lin_sharding = NamedSharding(mesh, P(None, None))
+        ln_sharding = NamedSharding(mesh, P(None,))
     get_lin_wts = lambda m: [l.weight for l in get_layers(m, (eqx.nn.Linear, eqx.nn.Embedding))]
     sharded_lin_wts = [sharding_fn(w, lin_sharding) for w in get_lin_wts(model)]
     model = eqx.tree_at(get_lin_wts, model, sharded_lin_wts)
 
-    ln_sharding = NamedSharding(mesh, P('data',))
     get_ln_wts = lambda m: [l.weight for l in get_layers(m, eqx.nn.LayerNorm)]
     sharded_ln_wts = [sharding_fn(w, ln_sharding) for w in get_ln_wts(model)]
     model = eqx.tree_at(get_ln_wts, model, sharded_ln_wts)
@@ -139,14 +144,16 @@ def train(config):
         optax.scale_by_schedule(scheduler),
         optax.scale(-1),
     ), every_k_schedule=config.g_accum_steps)
-    step, evaluate = make_training_fns(config, optimizer, mesh)
+    step, evaluate = make_training_fns(config, optimizer, mesh, config.shard_model)
 
     key = jrandom.PRNGKey(0)
     key, key1 = jrandom.split(key)
     model = GPT(config.model_config, key1)
     print(f'Model has {count_params(model)} parameters.')
-    model = shard_gpt(model, mesh)
+    model = shard_gpt(model, mesh, config.shard_model)
+    jax.debug.visualize_array_sharding(model.lm_head.weight)
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
+    jax.debug.visualize_array_sharding(opt_state.inner_opt_state[0].mu.lm_head.weight)
     first_step = 0
     if mngr.latest_step() is not None:
         model_leaves, opt_state_leaves = mngr.restore(mngr.latest_step())
