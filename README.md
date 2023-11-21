@@ -22,6 +22,7 @@ python launch.py --config=openwebtext --rundir=<rundir>
  - [x] Checkpointing and resuming
  - [x] Logging
  - [x] Grad accumulation
+ - [ ] Figure out why OOM on j6b with bs=1 on 4xA40
 
 
 ## Debugging
