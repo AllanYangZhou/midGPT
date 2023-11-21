@@ -16,6 +16,7 @@ from .model import GPT, GPTConfig
 jnp, jrandom, vmap, scan = jax.numpy, jax.random, jax.vmap, jax.lax.scan
 P, PRNGKey = jax.sharding.PartitionSpec, jax.random.PRNGKey
 jtu, NamedSharding = jax.tree_util, jax.sharding.NamedSharding
+with_sharding_constraint = jax.lax.with_sharding_constraint
 
 
 def get_batch(data, block_size, batch_size):
@@ -25,7 +26,7 @@ def get_batch(data, block_size, batch_size):
     return x, y
 
 
-def make_training_fns(config, optimizer):
+def make_training_fns(config, optimizer, mesh):
     policy = jmp.get_policy(config.policy)
     def loss_fn(model, x, y, key: tp.Optional[PRNGKey]):
         model = policy.cast_to_compute(model)
@@ -38,12 +39,14 @@ def make_training_fns(config, optimizer):
     @eqx.filter_jit
     def step(model, opt_state, x, y, key: PRNGKey):
         loss, grad = eqx.filter_value_and_grad(loss_fn)(model, x, y, key)
+        grad = shard_gpt(grad, mesh, sharding_fn=with_sharding_constraint)
         updates, opt_state = optimizer.update(grad, opt_state, model)
         model = eqx.apply_updates(model, updates)
         return loss, model, opt_state
 
+    data_sharding = NamedSharding(mesh, P('data', None))
     fast_loss_fn = eqx.filter_jit(loss_fn)
-    def evaluate(model, data, data_sharding):
+    def evaluate(model, data):
         model = eqx.Partial(model, inference=True)
         tot_loss = jnp.zeros(())
         for i in range(200):
@@ -84,16 +87,16 @@ def count_params(model):
     return sum([jnp.size(x) for x in jtu.tree_leaves(model) if isinstance(x, jax.Array)])
 
 
-def shard_gpt(model, mesh):
+def shard_gpt(model, mesh, sharding_fn=jax.device_put):
     """FSDP model parameter sharding. Assumes bias=False."""
     lin_sharding = NamedSharding(mesh, P(None, 'data'))
     get_lin_wts = lambda m: [l.weight for l in get_layers(m, (eqx.nn.Linear, eqx.nn.Embedding))]
-    sharded_lin_wts = [jax.device_put(w, lin_sharding) for w in get_lin_wts(model)]
+    sharded_lin_wts = [sharding_fn(w, lin_sharding) for w in get_lin_wts(model)]
     model = eqx.tree_at(get_lin_wts, model, sharded_lin_wts)
 
     ln_sharding = NamedSharding(mesh, P('data',))
     get_ln_wts = lambda m: [l.weight for l in get_layers(m, eqx.nn.LayerNorm)]
-    sharded_ln_wts = [jax.device_put(w, ln_sharding) for w in get_ln_wts(model)]
+    sharded_ln_wts = [sharding_fn(w, ln_sharding) for w in get_ln_wts(model)]
     model = eqx.tree_at(get_ln_wts, model, sharded_ln_wts)
 
     n_wts = len([x for x in jtu.tree_leaves(model) if isinstance(x, jax.Array)])
@@ -136,7 +139,7 @@ def train(config):
         optax.scale_by_schedule(scheduler),
         optax.scale(-1),
     ), every_k_schedule=config.g_accum_steps)
-    step, evaluate = make_training_fns(config, optimizer)
+    step, evaluate = make_training_fns(config, optimizer, mesh)
 
     key = jrandom.PRNGKey(0)
     key, key1 = jrandom.split(key)
@@ -160,8 +163,8 @@ def train(config):
     pbar = trange(first_step, config.max_steps, initial=first_step, total=config.max_steps)
     for i in pbar:
         if i % config.eval_interval == 0:
-            train_loss = evaluate(model, train_data, data_sharding).item()
-            val_loss = evaluate(model, val_data, data_sharding).item()
+            train_loss = evaluate(model, train_data).item()
+            val_loss = evaluate(model, val_data).item()
             postfix_values['train_loss'] = train_loss
             postfix_values['val_loss'] = val_loss
             log_metric(metrics_path, i, 'train_loss', train_loss)
@@ -173,5 +176,7 @@ def train(config):
         mngr.save(i, (jtu.tree_leaves(model), jtu.tree_leaves(opt_state)))
         postfix_values['loss'] = loss.item()
         postfix_values['lr'] = scheduler(opt_state.inner_opt_state[2].count).item()
+        if pbar.format_dict['rate'] is not None:
+            postfix_values['thruput'] = pbar.format_dict['rate'] * config.batch_size
         pbar.set_postfix(**postfix_values)
     pbar.close()
