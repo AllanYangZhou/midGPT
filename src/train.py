@@ -1,3 +1,4 @@
+import typing as tp
 import csv
 from functools import partial
 import time
@@ -16,53 +17,11 @@ from .model import GPT, GPTConfig
 
 jax.config.update("jax_threefry_partitionable", True)
 
-
 jnp, jrandom, vmap, scan = jax.numpy, jax.random, jax.vmap, jax.lax.scan
 P, PRNGKey = jax.sharding.PartitionSpec, jax.random.PRNGKey
 jtu, NamedSharding = jax.tree_util, jax.sharding.NamedSharding
 with_sharding_constraint = jax.lax.with_sharding_constraint
-
-
-def get_batch(data, block_size, batch_size):
-    ix = np.random.randint(0, len(data) - block_size, size=(batch_size,))
-    x = np.take(data, np.arange(block_size) + ix[:, None], axis=0).astype(np.int32)
-    y = np.take(data, np.arange(1, block_size + 1) + ix[:, None], axis=0).astype(np.int32)
-    return x, y
-
-
-def make_training_fns(config, optimizer, mesh, shard_model: bool):
-    policy = jmp.get_policy(config.policy)
-    def loss_fn(model, x, y, key: tp.Optional[PRNGKey]):
-        if key is not None:
-            key = jrandom.split(key, x.shape[0])
-        logits = vmap(model)(x, key=key)
-        loss = optax.softmax_cross_entropy_with_integer_labels(logits, y)
-        return loss.mean()
-
-    @partial(eqx.filter_jit, donate='all')
-    def step(model, opt_state, x, y, key: PRNGKey):
-        model_half = policy.cast_to_compute(model)
-        loss, grad = eqx.filter_value_and_grad(loss_fn)(model_half, x, y, key)
-        grad = shard_gpt(grad, mesh, shard_model, sharding_fn=with_sharding_constraint)
-        grad = policy.cast_to_param(grad)
-        updates, opt_state = optimizer.update(grad, opt_state, model)
-        model = eqx.apply_updates(model, updates)
-        return model, opt_state, loss
-
-    data_sharding = NamedSharding(mesh, P('data', None))
-    fast_loss_fn = eqx.filter_jit(loss_fn)
-    def evaluate(model, data):
-        model = policy.cast_to_compute(model)
-        model = eqx.Partial(model, inference=True)
-        tot_loss = jnp.zeros(())
-        for i in range(200):
-            x, y = get_batch(data, config.model_config.block_size, config.batch_size)
-            x, y = jax.device_put((jnp.array(x), jnp.array(y)), data_sharding)
-            loss = fast_loss_fn(model, x, y, None)
-            tot_loss = tot_loss + loss
-        return tot_loss / 200
-
-    return step, evaluate
+Array, Mesh = jax.Array, jax.sharding.Mesh
 
 
 @dataclass
@@ -84,22 +43,67 @@ class ExperimentConfig:
     model_config: GPTConfig
 
 
-def get_layers(model, layer_cls):
+def get_batch(data, block_size: int, batch_size: int) -> tp.Tuple[np.ndarray, np.ndarray]:
+    ix = np.random.randint(0, len(data) - block_size, size=(batch_size,))
+    x = np.take(data, np.arange(block_size) + ix[:, None], axis=0).astype(np.int32)
+    y = np.take(data, np.arange(1, block_size + 1) + ix[:, None], axis=0).astype(np.int32)
+    return x, y
+
+
+def make_training_fns(config: ExperimentConfig, optimizer, mesh: Mesh, shard_model: bool):
+    policy = jmp.get_policy(config.policy)
+    def loss_fn(model: eqx.Module, x: Array, y: Array, key: tp.Optional[PRNGKey]) -> Array:
+        if key is not None:
+            key = jrandom.split(key, x.shape[0])
+        logits = vmap(model)(x, key=key)
+        loss = optax.softmax_cross_entropy_with_integer_labels(logits, y)
+        return loss.mean()
+
+    @partial(eqx.filter_jit, donate='all')
+    def step(model: eqx.Module, opt_state, x: Array, y: Array, key: PRNGKey):
+        model_half = policy.cast_to_compute(model)
+        loss, grad = eqx.filter_value_and_grad(loss_fn)(model_half, x, y, key)
+        grad = shard_gpt(grad, mesh, shard_model, sharding_fn=with_sharding_constraint)
+        grad = policy.cast_to_param(grad)
+        updates, opt_state = optimizer.update(grad, opt_state, model)
+        model = eqx.apply_updates(model, updates)
+        return model, opt_state, loss
+
+    data_sharding = NamedSharding(mesh, P('data', None))
+    fast_loss_fn = eqx.filter_jit(loss_fn)
+    def evaluate(model: eqx.Module, data: np.ndarray) -> Array:
+        model = policy.cast_to_compute(model)
+        model = eqx.Partial(model, inference=True)
+        tot_loss = jnp.zeros(())
+        for i in range(200):
+            x, y = get_batch(data, config.model_config.block_size, config.batch_size)
+            x, y = jax.device_put((jnp.array(x), jnp.array(y)), data_sharding)
+            loss = fast_loss_fn(model, x, y, None)
+            tot_loss = tot_loss + loss
+        return tot_loss / 200
+
+    return step, evaluate
+
+
+def get_layers(model: eqx.Module, layer_cls: eqx.Module) -> tp.Iterable[eqx.Module]:
     """Get all layers of model matching layer_cls."""
     matches_cls = lambda x: isinstance(x, layer_cls)
     return filter(lambda x: matches_cls(x), jtu.tree_leaves(model, is_leaf=matches_cls))
 
 
-def count_params(model):
+def count_params(model: eqx.Module) -> int:
     return sum([jnp.size(x) for x in jtu.tree_leaves(model) if isinstance(x, jax.Array)])
 
 
-def shard_gpt(model, mesh, shard_model: bool, sharding_fn=jax.device_put):
-    """FSDP model parameter sharding. Assumes bias=False."""
+def shard_gpt(
+        model: eqx.Module, mesh: Mesh, shard_model: bool, sharding_fn=jax.device_put,
+) -> eqx.Module:
+    """Shard model parameters (or replicate if shard_model is False)."""
     if shard_model:
         lin_sharding = NamedSharding(mesh, P(None, 'data'))
         ln_sharding = NamedSharding(mesh, P('data',))
     else:
+        # currently, no strategy for biases
         lin_sharding = NamedSharding(mesh, P(None, None))
         ln_sharding = NamedSharding(mesh, P(None,))
     get_lin_wts = lambda m: [l.weight for l in get_layers(m, (eqx.nn.Linear, eqx.nn.Embedding))]
@@ -115,18 +119,25 @@ def shard_gpt(model, mesh, shard_model: bool, sharding_fn=jax.device_put):
     return model
 
 
-def log_metric(filename, step, metric_type, value):
+def log_metric(filename: str, step: int, metric_type: str, value: float):
     with open(filename, mode='a', newline='') as file:
         writer = csv.writer(file)
         timestamp = int(time.time())
         writer.writerow([timestamp, step, metric_type, value])
 
 
+@eqx.filter_jit
+def init_sharded_model(config: ExperimentConfig, mesh: Mesh, model_key: PRNGKey) -> eqx.Module:
+    # This function prevents ever initializing the unsharded model.
+    model = GPT(config.model_config, model_key)
+    return shard_gpt(model, mesh, config.shard_model, sharding_fn=with_sharding_constraint)
+
+
 def train(config):
     eqx.tree_pprint(config)
     n_devices = len(jax.devices())
     print(f"Using {n_devices} devices.")
-    mesh = jax.sharding.Mesh(mesh_utils.create_device_mesh((n_devices,)), axis_names=('data',))
+    mesh = Mesh(mesh_utils.create_device_mesh((n_devices,)), axis_names=('data',))
 
     train_data = np.memmap(os.path.join(config.data_dir, 'train.bin'), dtype=np.uint16, mode='r')
     val_data = np.memmap(os.path.join(config.data_dir, 'val.bin'), dtype=np.uint16, mode='r')
@@ -152,32 +163,23 @@ def train(config):
     ), every_k_schedule=config.g_accum_steps)
     step, evaluate = make_training_fns(config, optimizer, mesh, config.shard_model)
 
-    @eqx.filter_jit
-    def init_model(model_key):
-        # Need this helper fn to avoid ever instantiating model unsharded.
-        model = GPT(config.model_config, model_key)
-        return shard_gpt(model, mesh, config.shard_model, sharding_fn=with_sharding_constraint)
-
     key = jrandom.PRNGKey(0)
     key, key1 = jrandom.split(key)
-    model = init_model(key1)
+    model = init_sharded_model(key1)
     print(f'Model has {count_params(model)} parameters.')
-    jax.debug.visualize_array_sharding(model.lm_head.weight)
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
-    jax.debug.visualize_array_sharding(opt_state.inner_opt_state[0].mu.lm_head.weight)
     first_step = 0
-    if mngr.latest_step() is not None:
+    if mngr.latest_step() is not None:  # Restore existing checkpoint.
         model_leaves, opt_state_leaves = mngr.restore(mngr.latest_step())
         model = jtu.tree_unflatten(jtu.tree_structure(model), model_leaves)
         opt_state = jtu.tree_unflatten(jtu.tree_structure(opt_state), opt_state_leaves)
         first_step = mngr.latest_step() + 1
-    else:
-        # Initialize the metrics CSV
+    else:  # Initialize the metrics CSV
         with open(metrics_path, mode='w', newline='') as file:
             writer = csv.writer(file)
             writer.writerow(['Unix Timestamp', 'Step', 'Metric', 'Value'])
     data_sharding = NamedSharding(mesh, P('data', None))
-    postfix_values = {}
+    postfix_values = {}  # values to display in the progress bar
     pbar = trange(first_step, config.max_steps, initial=first_step, total=config.max_steps)
     for i in pbar:
         if i % config.eval_interval == 0:

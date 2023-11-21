@@ -5,7 +5,6 @@ config = ExperimentConfig(
     rundir='',
     data_dir='/scr/ayz/nano/openwebtext',
     learning_rate=6e-4,
-    # Ideal effective batch size: 480
     batch_size=16,
     warmup_steps=2000,
     min_lr=6e-5,
@@ -15,7 +14,7 @@ config = ExperimentConfig(
     weight_decay=0.1,
     eval_interval=1000,
     policy='params=float32,compute=bfloat16,output=bfloat16',
-    g_accum_steps=4,
+    g_accum_steps=8,
     shard_model=True,
     model_config=GPTConfig(
         block_size=1024, vocab_size=50304, n_layer=48, n_head=25,

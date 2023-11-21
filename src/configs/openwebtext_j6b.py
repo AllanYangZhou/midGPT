@@ -5,7 +5,6 @@ config = ExperimentConfig(
     rundir='',
     data_dir='/scr/ayz/nano/openwebtext',
     learning_rate=6e-4,
-    # Ideal effective batch size: 480
     batch_size=4,
     warmup_steps=2000,
     min_lr=6e-5,
