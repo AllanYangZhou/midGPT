@@ -3,7 +3,7 @@ from src.model import GPTConfig
 
 config = ExperimentConfig(
     rundir='',
-    data_dir='/scr/ayz/nano/openwebtext',
+    data_dir='data/openwebtext',
     learning_rate=6e-4,
     # Ideal effective batch size: 480
     batch_size=120,
@@ -16,7 +16,7 @@ config = ExperimentConfig(
     eval_interval=1000,
     policy='params=float32,compute=bfloat16,output=bfloat16',
     g_accum_steps=4,
-    shard_model=False,
+    shard_model=True,
     model_config=GPTConfig(
         block_size=1024, vocab_size=50304, n_layer=12, n_head=12,
         n_embd=768, dropout=0.0, bias=False,

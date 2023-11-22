@@ -3,7 +3,7 @@ from src.model import GPTConfig
 
 config = ExperimentConfig(
     rundir='',
-    data_dir='/scr/ayz/nano/openwebtext',
+    data_dir='data/openwebtext',
     learning_rate=6e-4,
     batch_size=16,
     warmup_steps=2000,

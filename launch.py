@@ -1,13 +1,14 @@
 import argparse
-import json
 import os
 from datetime import datetime
+import equinox as eqx
 from src.train import train
 
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--config', type=str, required=True)
 parser.add_argument('--rundir', type=str)
+parser.add_argument('--debug', action='store_true')
 cmd_args = parser.parse_args()
 
 # load config from src.configs
@@ -21,5 +22,7 @@ else:
 print(f'Writing to {config.rundir}')
 # make sure the directory exists
 os.makedirs(config.rundir, exist_ok=True)
+if cmd_args.debug: config.debug = True
 # TODO: save config to file
+eqx.tree_pprint(config)
 train(config)

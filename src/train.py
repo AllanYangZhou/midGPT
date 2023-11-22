@@ -41,6 +41,7 @@ class ExperimentConfig:
     g_accum_steps: int
     shard_model: bool
     model_config: GPTConfig
+    debug: bool = False
 
 
 def get_batch(data, block_size: int, batch_size: int) -> tp.Tuple[np.ndarray, np.ndarray]:
@@ -127,10 +128,9 @@ def log_metric(filename: str, step: int, metric_type: str, value: float):
 
 
 def train(config):
-    eqx.tree_pprint(config)
-    n_devices = len(jax.devices())
-    print(f"Using {n_devices} devices.")
-    mesh = Mesh(mesh_utils.create_device_mesh((n_devices,)), axis_names=('data',))
+    devices = jax.devices()
+    print(devices)
+    mesh = Mesh(mesh_utils.create_device_mesh((len(devices),)), axis_names=('data',))
 
     train_data = np.memmap(os.path.join(config.data_dir, 'train.bin'), dtype=np.uint16, mode='r')
     val_data = np.memmap(os.path.join(config.data_dir, 'val.bin'), dtype=np.uint16, mode='r')
@@ -178,7 +178,7 @@ def train(config):
     postfix_values = {}  # values to display in the progress bar
     pbar = trange(first_step, config.max_steps, initial=first_step, total=config.max_steps)
     for i in pbar:
-        if i % config.eval_interval == 0:
+        if not config.debug and (i % config.eval_interval == 0):
             train_loss = evaluate(model, train_data).item()
             val_loss = evaluate(model, val_data).item()
             postfix_values['train_loss'] = train_loss
@@ -187,9 +187,11 @@ def train(config):
             log_metric(metrics_path, i, 'val_loss', val_loss)
         key, key1 = jrandom.split(key)
         x, y = get_batch(train_data, config.model_config.block_size, config.batch_size)
+        if i == 1: jax.profiler.start_trace(os.path.join(config.rundir, 'trace'))
         x, y = jax.device_put((x, y), data_sharding)
         model, opt_state, loss = step(model, opt_state, x, y, key1)
-        mngr.save(i, (jtu.tree_leaves(model), jtu.tree_leaves(opt_state)))
+        if i == 1: loss.block_until_ready(); jax.profiler.stop_trace()
+        if not config.debug: mngr.save(i, (jtu.tree_leaves(model), jtu.tree_leaves(opt_state)))
         postfix_values['loss'] = loss.item()
         postfix_values['lr'] = scheduler(opt_state[2].count).item()
         if pbar.format_dict['rate'] is not None:
