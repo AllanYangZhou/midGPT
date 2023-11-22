@@ -62,9 +62,8 @@ class CausalSelfAttention(eqx.Module):
         k = jnp.transpose(jnp.reshape(k, (T, self.n_head, n_per_head)), (1, 0, 2))
         v = jnp.transpose(jnp.reshape(v, (T, self.n_head, n_per_head)), (1, 0, 2))
         att = q @ jnp.transpose(k, (0, 2, 1))  # (n_head, T, T)
-        # Causal mask
-        idx_x, idx_y = jnp.triu_indices(T, 1)
-        att = att.at[..., idx_x, idx_y].set(float('-inf'))
+        causal_mask = jnp.tril(jnp.ones((1, T, T))) == 0
+        att = jnp.where(causal_mask, float('-inf'), att)
         # Softmax should be in full precision.
         orig_dtype = att.dtype
         att = jax.nn.softmax(att.astype(jnp.float32) / jnp.sqrt(n_per_head), axis=-1)
