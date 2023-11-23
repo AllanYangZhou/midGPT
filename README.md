@@ -24,8 +24,6 @@ Add a `--debug` if you want to skip eval and checkpoint saving.
  - [x] Checkpointing and resuming
  - [x] Logging
  - [x] Grad accumulation
- - [ ] Reloaded checkpoints seem to use more memory. E.g. `python launch.py --config=openwebtext_xl --rundir=outputs/2023-11-21-01-30-10` OOMs on iris6.
- - [ ] Can we speed up xl?
 
 
 ## Debugging
