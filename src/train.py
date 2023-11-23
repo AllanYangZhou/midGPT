@@ -1,7 +1,5 @@
 import typing as tp
-import csv
 from functools import partial
-import time
 import typing as tp
 from dataclasses import dataclass
 import os
@@ -12,6 +10,7 @@ import jmp
 import optax
 import orbax.checkpoint as ocp
 import numpy as np
+from tensorboardX import SummaryWriter
 from tqdm import trange
 from .model import GPT, GPTConfig
 
@@ -120,21 +119,14 @@ def shard_gpt(
     return model
 
 
-def log_metric(filename: str, step: int, metric_type: str, value: float):
-    with open(filename, mode='a', newline='') as file:
-        writer = csv.writer(file)
-        timestamp = int(time.time())
-        writer.writerow([timestamp, step, metric_type, value])
-
-
 def train(config):
+    writer = SummaryWriter(os.path.join(config.rundir, 'logs'), flush_secs=30)
     devices = jax.devices()
     print(devices)
     mesh = Mesh(mesh_utils.create_device_mesh((len(devices),)), axis_names=('data',))
 
     train_data = np.memmap(os.path.join(config.data_dir, 'train.bin'), dtype=np.uint16, mode='r')
     val_data = np.memmap(os.path.join(config.data_dir, 'val.bin'), dtype=np.uint16, mode='r')
-    metrics_path = os.path.join(config.rundir, 'metrics.csv')
 
     options = ocp.CheckpointManagerOptions(
         max_to_keep=1, save_interval_steps=config.eval_interval)
@@ -147,6 +139,7 @@ def train(config):
         0, config.learning_rate, config.warmup_steps, config.lr_decay_steps,
         end_value=config.min_lr)
     optimizer = optax.chain(
+        optax.clip_by_global_norm(1.0),
         optax.scale_by_adam(b2=config.beta2),
         optax.add_decayed_weights(config.weight_decay),
         optax.scale_by_schedule(scheduler),
@@ -170,10 +163,6 @@ def train(config):
         model = jtu.tree_unflatten(jtu.tree_structure(model), model_leaves)
         opt_state = jtu.tree_unflatten(jtu.tree_structure(opt_state), opt_state_leaves)
         first_step = mngr.latest_step() + 1
-    else:  # Initialize the metrics CSV
-        with open(metrics_path, mode='w', newline='') as file:
-            writer = csv.writer(file)
-            writer.writerow(['Unix Timestamp', 'Step', 'Metric', 'Value'])
     data_sharding = NamedSharding(mesh, P('data', None))
     postfix_values = {}  # values to display in the progress bar
     pbar = trange(first_step, config.max_steps, initial=first_step, total=config.max_steps)
@@ -183,18 +172,19 @@ def train(config):
             val_loss = evaluate(model, val_data).item()
             postfix_values['train_loss'] = train_loss
             postfix_values['val_loss'] = val_loss
-            log_metric(metrics_path, i, 'train_loss', train_loss)
-            log_metric(metrics_path, i, 'val_loss', val_loss)
+            writer.add_scalar('loss/train', train_loss, i)
+            writer.add_scalar('loss/val', val_loss, i)
         key, key1 = jrandom.split(key)
         x, y = get_batch(train_data, config.model_config.block_size, config.batch_size)
-        if i == 1: jax.profiler.start_trace(os.path.join(config.rundir, 'trace'))
+        if i == 1: jax.profiler.start_trace(os.path.join(config.rundir, 'logs'))
         x, y = jax.device_put((x, y), data_sharding)
         model, opt_state, loss = step(model, opt_state, x, y, key1)
         if i == 1: loss.block_until_ready(); jax.profiler.stop_trace()
         if not config.debug: mngr.save(i, (jtu.tree_leaves(model), jtu.tree_leaves(opt_state)))
         postfix_values['loss'] = loss.item()
-        postfix_values['lr'] = scheduler(opt_state[2].count).item()
+        postfix_values['lr'] = scheduler(opt_state[3].count).item()
         if pbar.format_dict['rate'] is not None:
             postfix_values['thruput'] = pbar.format_dict['rate'] * config.batch_size
         pbar.set_postfix(**postfix_values)
     pbar.close()
+    writer.close()

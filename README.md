@@ -13,6 +13,8 @@ python launch.py --config=openwebtext
 python launch.py --config=openwebtext --rundir=<rundir>
 ```
 
+Add a `--debug` if you want to skip eval and checkpoint saving.
+
 ## Feature list
 
  - [x] Basic training on OWT
