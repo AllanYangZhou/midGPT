@@ -92,7 +92,9 @@ def get_layers(model: eqx.Module, layer_cls: eqx.Module) -> tp.Iterable[eqx.Modu
 
 
 def count_params(model: eqx.Module) -> int:
-    return sum([jnp.size(x) for x in jtu.tree_leaves(model) if isinstance(x, jax.Array)])
+    dupe = jnp.size(model.lm_head.weight)  # embedding and final layer are shared.
+    tot = sum([jnp.size(x) for x in jtu.tree_leaves(model) if isinstance(x, jax.Array)])
+    return tot - dupe - jnp.size(model.wpe.weight)  # non-embedding only.
 
 
 def shard_gpt(

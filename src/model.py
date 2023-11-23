@@ -120,10 +120,6 @@ class GPT(eqx.Module):
 
     def __init__(self, config, key):
         key1, key2, key3, key4 = jrandom.split(key, 4)
-        embed_w1 = 0.02 * jrandom.normal(key1, (config.vocab_size, config.n_embd))
-        embed_w2 = 0.02 * jrandom.normal(key2, (config.block_size, config.n_embd))
-        self.wte = eqx.nn.Embedding(config.vocab_size, config.n_embd, weight=embed_w1)
-        self.wpe = eqx.nn.Embedding(config.block_size, config.n_embd, weight=embed_w2)
         self.drop = eqx.nn.Dropout(config.dropout)
         block_keys = jrandom.split(key3, config.n_layer)
         c_proj_std = 0.02 / math.sqrt(2 * config.n_layer)
@@ -133,6 +129,9 @@ class GPT(eqx.Module):
         self.ln_f = eqx.nn.LayerNorm(config.n_embd, eps=1e-5, use_bias=config.bias)
         self.lm_head = reinit_linear(eqx.nn.Linear(
             config.n_embd, config.vocab_size, use_bias=config.bias, key=key4), key4)
+        self.wte = eqx.nn.Embedding(config.vocab_size, config.n_embd, weight=self.lm_head.weight)
+        wpe_wt = 0.02 * jrandom.normal(key2, (config.block_size, config.n_embd))
+        self.wpe = eqx.nn.Embedding(config.block_size, config.n_embd, weight=wpe_wt)
 
     def __call__(self, x, inference=False, key=None):  # (T, vocab_size)
         drop_key, block_keys = None, (None,) * len(self.blocks)
