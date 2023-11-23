@@ -1,6 +1,5 @@
 import typing as tp
 from functools import partial
-import typing as tp
 from dataclasses import dataclass
 import os
 import equinox as eqx
@@ -17,7 +16,7 @@ from .model import GPT, GPTConfig
 jax.config.update("jax_threefry_partitionable", True)
 
 jnp, jrandom, vmap, scan = jax.numpy, jax.random, jax.vmap, jax.lax.scan
-P, PRNGKey = jax.sharding.PartitionSpec, jax.random.PRNGKey
+P, KeyArray = jax.sharding.PartitionSpec, tp.Any
 jtu, NamedSharding = jax.tree_util, jax.sharding.NamedSharding
 with_sharding_constraint = jax.lax.with_sharding_constraint
 Array, Mesh = jax.Array, jax.sharding.Mesh
@@ -25,19 +24,19 @@ Array, Mesh = jax.Array, jax.sharding.Mesh
 
 @dataclass
 class ExperimentConfig:
-    rundir: str
-    data_dir: str
+    rundir: str  # Directory containing ckpts and logs.
+    data_dir: str  # Dataset directory
     learning_rate: float
-    batch_size: int
+    batch_size: int  # GLOBAL across all devices (not per device)
     warmup_steps: int
-    min_lr: float
+    min_lr: float  # Final LR after decay
     lr_decay_steps: int
-    max_steps: int
+    max_steps: int  # No. of grad steps: iters / g_accum_iters
     beta2: float
     weight_decay: float
     eval_interval: int
     policy: str
-    g_accum_steps: int
+    g_accum_iters: int  # Accumulate this many grads before step
     shard_model: bool
     model_config: GPTConfig
     debug: bool = False
@@ -50,17 +49,21 @@ def get_batch(data, block_size: int, batch_size: int) -> tp.Tuple[np.ndarray, np
     return x, y
 
 
-def make_training_fns(config: ExperimentConfig, optimizer, mesh: Mesh, shard_model: bool):
+def make_training_fns(
+        config: ExperimentConfig, optimizer: optax.GradientTransformationExtraArgs,
+        mesh: Mesh, shard_model: bool) -> tp.Tuple[tp.Callable, tp.Callable]:
     policy = jmp.get_policy(config.policy)
-    def loss_fn(model: eqx.Module, x: Array, y: Array, key: tp.Optional[PRNGKey]) -> Array:
+    def loss_fn(model: GPT, x: Array, y: Array, key: tp.Optional[KeyArray]) -> Array:
         if key is not None:
             key = jrandom.split(key, x.shape[0])
         logits = vmap(model)(x, key=key)
-        loss = optax.softmax_cross_entropy_with_integer_labels(logits, y)
-        return loss.mean()
+        orig_dtype = logits.dtype
+        loss = optax.softmax_cross_entropy_with_integer_labels(
+            logits.astype(jnp.float32), y)  # compute loss in float32
+        return loss.astype(orig_dtype).mean()
 
     @partial(eqx.filter_jit, donate='all')
-    def step(model: eqx.Module, opt_state, x: Array, y: Array, key: PRNGKey):
+    def step(model: GPT, opt_state, x: Array, y: Array, key: KeyArray):
         model_half = policy.cast_to_compute(model)
         loss, grad = eqx.filter_value_and_grad(loss_fn)(model_half, x, y, key)
         grad = shard_gpt(grad, mesh, shard_model)
@@ -71,7 +74,7 @@ def make_training_fns(config: ExperimentConfig, optimizer, mesh: Mesh, shard_mod
 
     data_sharding = NamedSharding(mesh, P('data', None))
     fast_loss_fn = eqx.filter_jit(loss_fn)
-    def evaluate(model: eqx.Module, data: np.ndarray) -> Array:
+    def evaluate(model: GPT, data: np.ndarray) -> Array:
         model = policy.cast_to_compute(model)
         model = eqx.Partial(model, inference=True)
         tot_loss = jnp.zeros(())
@@ -85,20 +88,20 @@ def make_training_fns(config: ExperimentConfig, optimizer, mesh: Mesh, shard_mod
     return step, evaluate
 
 
-def get_layers(model: eqx.Module, layer_cls: eqx.Module) -> tp.Iterable[eqx.Module]:
+def get_layers(model: GPT, layer_cls: tp.Type[eqx.Module]) -> tp.Iterable[eqx.Module]:
     """Get all layers of model matching layer_cls."""
     matches_cls = lambda x: isinstance(x, layer_cls)
     return filter(lambda x: matches_cls(x), jtu.tree_leaves(model, is_leaf=matches_cls))
 
 
-def count_params(model: eqx.Module) -> int:
+def count_params(model: GPT) -> int:
     dupe = jnp.size(model.lm_head.weight)  # embedding and final layer are shared.
     tot = sum([jnp.size(x) for x in jtu.tree_leaves(model) if isinstance(x, jax.Array)])
     return tot - dupe - jnp.size(model.wpe.weight)  # non-embedding only.
 
 
 def shard_gpt(
-        model: eqx.Module, mesh: Mesh, shard_model: bool, sharding_fn=with_sharding_constraint
+        model: GPT, mesh: Mesh, shard_model: bool, sharding_fn=with_sharding_constraint
 ) -> eqx.Module:
     """Shard model parameters (or replicate if shard_model is False)."""
     if shard_model:
@@ -121,7 +124,7 @@ def shard_gpt(
     return model
 
 
-def train(config):
+def train(config: ExperimentConfig):
     writer = SummaryWriter(os.path.join(config.rundir, 'logs'), flush_secs=30)
     devices = jax.devices()
     print(devices)
@@ -137,16 +140,18 @@ def train(config):
         ocp.PyTreeCheckpointer(),
         options=options)
 
+    # optax operates on iters, not grad steps
+    warmup_iters = config.warmup_steps * config.g_accum_iters
+    lr_decay_iters = config.lr_decay_steps * config.g_accum_iters
     scheduler = optax.warmup_cosine_decay_schedule(
-        0, config.learning_rate, config.warmup_steps, config.lr_decay_steps,
-        end_value=config.min_lr)
+        0, config.learning_rate, warmup_iters, lr_decay_iters, end_value=config.min_lr)
     optimizer = optax.chain(
         optax.clip_by_global_norm(1.0),
         optax.scale_by_adam(b2=config.beta2),
         optax.add_decayed_weights(config.weight_decay),
         optax.scale_by_schedule(scheduler),
         optax.scale(-1),
-        optax.apply_every(config.g_accum_steps),
+        optax.apply_every(config.g_accum_iters),
     )
     step, evaluate = make_training_fns(config, optimizer, mesh, config.shard_model)
 
@@ -167,22 +172,24 @@ def train(config):
         first_step = mngr.latest_step() + 1
     data_sharding = NamedSharding(mesh, P('data', None))
     postfix_values = {}  # values to display in the progress bar
-    pbar = trange(first_step, config.max_steps, initial=first_step, total=config.max_steps)
-    for i in pbar:
-        if not config.debug and (i % config.eval_interval == 0):
+    max_iters = config.max_steps * config.g_accum_iters
+    pbar = trange(first_step, max_iters, initial=first_step, total=max_iters)
+    eval_interval = config.eval_interval * config.g_accum_iters
+    for itr in pbar:
+        if not config.debug and (itr % eval_interval == 0):
             train_loss = evaluate(model, train_data).item()
             val_loss = evaluate(model, val_data).item()
             postfix_values['train_loss'] = train_loss
             postfix_values['val_loss'] = val_loss
-            writer.add_scalar('loss/train', train_loss, i)
-            writer.add_scalar('loss/val', val_loss, i)
+            writer.add_scalar('loss/train', train_loss, itr)
+            writer.add_scalar('loss/val', val_loss, itr)
         key, key1 = jrandom.split(key)
         x, y = get_batch(train_data, config.model_config.block_size, config.batch_size)
-        if i == 1: jax.profiler.start_trace(os.path.join(config.rundir, 'logs'))
+        if itr == 1: jax.profiler.start_trace(os.path.join(config.rundir, 'logs'))
         x, y = jax.device_put((x, y), data_sharding)
         model, opt_state, loss = step(model, opt_state, x, y, key1)
-        if i == 1: loss.block_until_ready(); jax.profiler.stop_trace()
-        if not config.debug: mngr.save(i, (jtu.tree_leaves(model), jtu.tree_leaves(opt_state)))
+        if itr == 1: loss.block_until_ready(); jax.profiler.stop_trace()
+        if not config.debug: mngr.save(itr, (jtu.tree_leaves(model), jtu.tree_leaves(opt_state)))
         postfix_values['loss'] = loss.item()
         postfix_values['lr'] = scheduler(opt_state[3].count).item()
         if pbar.format_dict['rate'] is not None:

@@ -14,7 +14,7 @@ config = ExperimentConfig(
     weight_decay=0.1,
     eval_interval=2000,
     policy='params=float32,compute=bfloat16,output=bfloat16',
-    g_accum_steps=1,
+    g_accum_iters=1,
     shard_model=False,
     model_config=GPTConfig(
         block_size=256, vocab_size=65, n_layer=6, n_head=6,

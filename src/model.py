@@ -101,13 +101,13 @@ class Block(eqx.Module):
 
 @dataclass
 class GPTConfig:
-    block_size: int
-    vocab_size: int
-    n_layer: int
-    n_head: int
-    n_embd: int
+    block_size: int  # Max sequence length
+    vocab_size: int  # No. of tokens
+    n_layer: int  # No. of transformer blocks
+    n_head: int  # No. attention heads
+    n_embd: int  # Hidden dimension
     dropout: float
-    bias: bool
+    bias: bool  # Whether or not to use biases in linear layers
 
 
 class GPT(eqx.Module):
@@ -119,18 +119,17 @@ class GPT(eqx.Module):
     lm_head: eqx.Module
 
     def __init__(self, config, key):
-        key1, key2, key3, key4 = jrandom.split(key, 4)
+        block_key, head_key, wpe_key = jrandom.split(key, 3)
         self.drop = eqx.nn.Dropout(config.dropout)
-        block_keys = jrandom.split(key3, config.n_layer)
         c_proj_std = 0.02 / math.sqrt(2 * config.n_layer)
         self.blocks = [Block(
             config.n_embd, config.n_head, config.bias, config.dropout, c_proj_std, bkey
-        ) for bkey in block_keys]
+        ) for bkey in jrandom.split(block_key, config.n_layer)]
         self.ln_f = eqx.nn.LayerNorm(config.n_embd, eps=1e-5, use_bias=config.bias)
         self.lm_head = reinit_linear(eqx.nn.Linear(
-            config.n_embd, config.vocab_size, use_bias=config.bias, key=key4), key4)
+            config.n_embd, config.vocab_size, use_bias=config.bias, key=head_key), head_key)
         self.wte = eqx.nn.Embedding(config.vocab_size, config.n_embd, weight=self.lm_head.weight)
-        wpe_wt = 0.02 * jrandom.normal(key2, (config.block_size, config.n_embd))
+        wpe_wt = 0.02 * jrandom.normal(wpe_key, (config.block_size, config.n_embd))
         self.wpe = eqx.nn.Embedding(config.block_size, config.n_embd, weight=wpe_wt)
 
     def __call__(self, x, inference=False, key=None):  # (T, vocab_size)
