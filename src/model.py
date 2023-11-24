@@ -28,6 +28,7 @@ class MLP(eqx.Module):
             4 * n_embd, n_embd, use_bias=bias, key=key2), key2, w_std=c_proj_std)
         self.dropout = eqx.nn.Dropout(dropout)
 
+    @jax.named_scope('mlp')
     def __call__(self, x, inference=False, key=None):
         x = jax.nn.gelu(self.c_fc(x))
         return self.dropout(self.c_proj(x), inference=inference, key=key)
@@ -51,6 +52,7 @@ class CausalSelfAttention(eqx.Module):
         self.attn_dropout = eqx.nn.Dropout(dropout)
         self.resid_dropout = eqx.nn.Dropout(dropout)
 
+    @jax.named_scope('causal_sa')
     def __call__(self, x, inference=False, key=None):
         attndrop_key, projdrop_key = jrandom.split(key) if key is not None else (None, None)
         T, C = x.shape
@@ -89,6 +91,7 @@ class Block(eqx.Module):
         self.ln1 = eqx.nn.LayerNorm(n_embd, eps=1e-5, use_bias=bias)
         self.ln2 = eqx.nn.LayerNorm(n_embd, eps=1e-5, use_bias=bias)
 
+    @jax.named_scope('block')
     def __call__(self, x, inference=False, key=None):
         attn_key, mlp_key = (None, None)
         if key is not None:
@@ -132,6 +135,7 @@ class GPT(eqx.Module):
         wpe_wt = 0.02 * jrandom.normal(wpe_key, (config.block_size, config.n_embd))
         self.wpe = eqx.nn.Embedding(config.block_size, config.n_embd, weight=wpe_wt)
 
+    @jax.named_scope('gpt')
     def __call__(self, x, inference=False, key=None):  # (T, vocab_size)
         drop_key, block_keys = None, (None,) * len(self.blocks)
         if key is not None:

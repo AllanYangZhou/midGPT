@@ -60,7 +60,7 @@ def make_training_fns(
         orig_dtype = logits.dtype
         loss = optax.softmax_cross_entropy_with_integer_labels(
             logits.astype(jnp.float32), y)  # compute loss in float32
-        return loss.astype(orig_dtype).mean()
+        return loss.mean().astype(orig_dtype)
 
     @partial(eqx.filter_jit, donate='all')
     def step(model: GPT, opt_state, x: Array, y: Array, key: KeyArray):
