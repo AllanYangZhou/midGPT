@@ -4,7 +4,27 @@ import typing as tp
 import equinox as eqx
 import jax
 
-jnp, jrandom, vmap = jax.numpy, jax.random, jax.vmap
+jnp, jrandom, vmap, Array = jax.numpy, jax.random, jax.vmap, jax.Array
+
+
+class Embedding(eqx.Module):
+    """eqx Embedding requires vmapping over T dimension, which ends up being very slow."""
+    num_embeddings: int = eqx.field(static=True)
+    embedding_size: int = eqx.field(static=True)
+    weight: Array
+
+    def __init__(self, num_embeddings, embedding_size, weight=None, *, key=None, **kwargs):
+        super().__init__(**kwargs)
+        if weight is None:
+            self.weight = jrandom.normal(key, (num_embeddings, embedding_size))
+        else:
+            self.weight = weight
+        self.num_embeddings = num_embeddings
+        self.embedding_size = embedding_size
+
+    @jax.named_scope("Embedding")
+    def __call__(self, x, *, key=None):  # x: (T,)
+        return jnp.take(self.weight, x, axis=0)
 
 
 def reinit_linear(layer: eqx.nn.Linear, key, w_std=0.02):
@@ -131,17 +151,17 @@ class GPT(eqx.Module):
         self.ln_f = eqx.nn.LayerNorm(config.n_embd, eps=1e-5, use_bias=config.bias)
         self.lm_head = reinit_linear(eqx.nn.Linear(
             config.n_embd, config.vocab_size, use_bias=config.bias, key=head_key), head_key)
-        self.wte = eqx.nn.Embedding(config.vocab_size, config.n_embd, weight=self.lm_head.weight)
+        self.wte = Embedding(config.vocab_size, config.n_embd, weight=self.lm_head.weight)
         wpe_wt = 0.02 * jrandom.normal(wpe_key, (config.block_size, config.n_embd))
-        self.wpe = eqx.nn.Embedding(config.block_size, config.n_embd, weight=wpe_wt)
+        self.wpe = Embedding(config.block_size, config.n_embd, weight=wpe_wt)
 
     @jax.named_scope('gpt')
-    def __call__(self, x, inference=False, key=None):  # (T, vocab_size)
+    def __call__(self, x, inference=False, key=None):  # (T,)
         drop_key, block_keys = None, (None,) * len(self.blocks)
         if key is not None:
             drop_key, block_keys = jrandom.split(key)
             block_keys = jrandom.split(block_keys, len(self.blocks))
-        x = vmap(self.wte)(x) + vmap(self.wpe)(jnp.arange(x.shape[0]))
+        x = self.wte(x) + self.wpe(jnp.arange(x.shape[0]))
         x = self.drop(x, inference=inference, key=drop_key)
         for block_key, block in zip(block_keys, self.blocks):
             x = block(x, inference=inference, key=block_key)

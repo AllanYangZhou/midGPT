@@ -11,7 +11,7 @@ import orbax.checkpoint as ocp
 import numpy as np
 from tensorboardX import SummaryWriter
 from tqdm import trange
-from .model import GPT, GPTConfig
+from .model import GPT, GPTConfig, Embedding
 
 jax.config.update("jax_threefry_partitionable", True)
 
@@ -111,7 +111,7 @@ def shard_gpt(
         # currently, no strategy for biases
         lin_sharding = NamedSharding(mesh, P(None, None))
         ln_sharding = NamedSharding(mesh, P(None,))
-    get_lin_wts = lambda m: [l.weight for l in get_layers(m, (eqx.nn.Linear, eqx.nn.Embedding))]
+    get_lin_wts = lambda m: [l.weight for l in get_layers(m, (eqx.nn.Linear, Embedding))]
     sharded_lin_wts = [sharding_fn(w, lin_sharding) for w in get_lin_wts(model)]
     model = eqx.tree_at(get_lin_wts, model, sharded_lin_wts)
 
