@@ -157,6 +157,7 @@ class GPT(eqx.Module):
 
     @jax.named_scope('gpt')
     def __call__(self, x, inference=False, key=None):  # (T,)
+        # Either (inference=False and key) or (inference=True and key=None)
         drop_key, block_keys = None, (None,) * len(self.blocks)
         if key is not None:
             drop_key, block_keys = jrandom.split(key)
@@ -168,3 +169,39 @@ class GPT(eqx.Module):
         x = vmap(self.ln_f)(x)
         logits = vmap(self.lm_head)(x)
         return logits  # (T, vocab_size)
+
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, key=None):
+        block_size = self.wpe.weight.shape[0]
+
+        def forward(x):
+            return self(x, inference=True)
+        # TODO: Move JIT outside this function. And move this function to sample.py.
+        batched_model = eqx.filter_jit(eqx.filter_vmap(forward))
+
+        if key is None:
+            key = jax.random.PRNGKey(0) # TODO check with ayz
+
+        for i in range(max_new_tokens):
+            # take the final block_size tokens for conditioning, if the sequence is too long
+            idx_cond = idx if idx.shape[1] <= block_size else idx[:, -block_size:]
+            pluck_T = idx.shape[1]-1
+            if idx_cond.shape[1] < block_size:
+                B, pad_T = idx_cond.shape[0], block_size - idx_cond.shape[1]
+                padding = jnp.zeros((B, pad_T), dtype=idx_cond.dtype)
+                idx_cond_new = jnp.concatenate([idx_cond, padding], axis=1)
+            else:
+                idx_cond_new = idx_cond
+
+            # take the forward pass
+            logits = batched_model(idx_cond_new)
+            # pluck the logits at the final step and scale by desired temperature
+            logits = logits[:, pluck_T, :] / temperature
+
+            # TODO: handle top_k
+
+            key, next_token_key = jrandom.split(key)
+            # sample from the distribution
+            idx_next = jax.random.categorical(next_token_key, logits, axis=1, shape=(idx.shape[0], 1))
+            # append sampled index to the running sequence and continue
+            idx = jnp.concatenate([idx, idx_next], axis=1)
+        return idx

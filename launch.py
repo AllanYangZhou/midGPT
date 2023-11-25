@@ -1,4 +1,6 @@
 import argparse
+from dataclasses import asdict
+import json
 import os
 from datetime import datetime
 import equinox as eqx
@@ -23,6 +25,7 @@ print(f'Writing to {config.rundir}')
 # make sure the directory exists
 os.makedirs(config.rundir, exist_ok=True)
 if cmd_args.debug: config.debug = True
-# TODO: save config to file
+with open(os.path.join(config.rundir, "config.json"), 'w') as f:
+    f.write(json.dumps(asdict(config)))
 eqx.tree_pprint(config)
 train(config)
