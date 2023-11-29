@@ -57,7 +57,7 @@ def get_batch(
 
 def make_training_fns(
         config: ExperimentConfig, optimizer: optax.GradientTransformationExtraArgs,
-        mesh: Mesh, shard_model: bool) -> tp.Tuple[tp.Callable, tp.Callable]:
+        mesh: Mesh) -> tp.Tuple[tp.Callable, tp.Callable]:
     policy = jmp.get_policy(config.policy)
     def loss_fn(model_params: GPT, model_static: GPT, x: Array, y: Array, key: tp.Optional[KeyArray]) -> Array:
         model = eqx.combine(model_params, model_static)
@@ -86,8 +86,9 @@ def make_training_fns(
         (loss, grad), _ = scan(accum_loss_grad, init_loss_grad, (x, y, all_keys))
         # Loss and grad were accumulated (summed) over G, so divide.
         loss, grad = loss / G, jtu.tree_map(lambda x: x / G, grad)
-        # put grad back in params dtype and enforce sharding
-        grad = shard_gpt(policy.cast_to_param(grad), mesh, shard_model)
+        # put grad back in params dtype
+        grad = policy.cast_to_param(grad)
+        if config.shard_model: grad = shard_gpt(grad, mesh)
         updates, opt_state = optimizer.update(grad, opt_state, model)
         model = eqx.apply_updates(model, updates)
         return model, opt_state, loss
@@ -125,17 +126,10 @@ def count_params(model: GPT) -> int:
     return tot - dupe - jnp.size(model.wpe.weight)  # non-embedding only.
 
 
-def shard_gpt(
-        model: GPT, mesh: Mesh, shard_model: bool, sharding_fn=with_sharding_constraint
-) -> eqx.Module:
-    """Shard model parameters (or replicate if shard_model is False)."""
-    if shard_model:
-        lin_sharding = NamedSharding(mesh, P(None, 'data'))
-        ln_sharding = NamedSharding(mesh, P('data',))
-    else:
-        # currently, no strategy for biases
-        lin_sharding = NamedSharding(mesh, P(None, None))
-        ln_sharding = NamedSharding(mesh, P(None,))
+def shard_gpt(model: GPT, mesh: Mesh, sharding_fn=with_sharding_constraint) -> eqx.Module:
+    """Shard model parameters over devices (TPUs or GPUs)."""
+    lin_sharding = NamedSharding(mesh, P(None, 'data'))
+    ln_sharding = NamedSharding(mesh, P('data',))
     get_lin_wts = lambda m: [l.weight for l in get_layers(m, (eqx.nn.Linear, Embedding))]
     sharded_lin_wts = [sharding_fn(w, lin_sharding) for w in get_lin_wts(model)]
     model = eqx.tree_at(get_lin_wts, model, sharded_lin_wts)
@@ -165,7 +159,6 @@ def train(config: ExperimentConfig):
         ocp.PyTreeCheckpointer(),
         options=options)
 
-    # optax operates on iters, not grad steps
     scheduler = optax.warmup_cosine_decay_schedule(
         0, config.learning_rate, config.warmup_steps, config.lr_decay_steps,
         end_value=config.min_lr)
@@ -176,12 +169,13 @@ def train(config: ExperimentConfig):
         optax.scale_by_schedule(scheduler),
         optax.scale(-1),
     )
-    step, evaluate = make_training_fns(config, optimizer, mesh, config.shard_model)
+    step, evaluate = make_training_fns(config, optimizer, mesh)
 
     key = jrandom.PRNGKey(0)
     def init_sharded_model(model_key):
         model = GPT(config.model_config, model_key)
-        return shard_gpt(model, mesh, config.shard_model)
+        if config.shard_model: model = shard_gpt(model, mesh)
+        return model
     key, key1 = jrandom.split(key)
     # Use jit with sharding constraints to init sharded model.
     model = eqx.filter_jit(init_sharded_model)(key1)

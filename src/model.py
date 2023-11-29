@@ -106,8 +106,8 @@ class Block(eqx.Module):
             key=key1)
         self.mlp = MLP(
             n_embd=n_embd, bias=bias, dropout=dropout, c_proj_std=c_proj_std, key=key2)
-        self.ln1 = vmap(eqx.nn.LayerNorm(n_embd, eps=1e-5, use_bias=bias))
-        self.ln2 = vmap(eqx.nn.LayerNorm(n_embd, eps=1e-5, use_bias=bias))
+        self.ln1 = eqx.nn.LayerNorm(n_embd, eps=1e-5, use_bias=bias)
+        self.ln2 = eqx.nn.LayerNorm(n_embd, eps=1e-5, use_bias=bias)
 
     @jax.named_scope('block')
     def __call__(self, x_TxD, inference=False, key=None):
@@ -115,9 +115,9 @@ class Block(eqx.Module):
         if key is not None:
             attn_key, mlp_key = jrandom.split(key)
             mlp_key = jrandom.split(mlp_key, x_TxD.shape[0])
-        x_TxD = x_TxD + self.attn(self.ln1(x_TxD), inference=inference, key=attn_key)
+        x_TxD = x_TxD + self.attn(vmap(self.ln1)(x_TxD), inference=inference, key=attn_key)
         mlp = vmap(eqx.Partial(self.mlp, inference=inference))
-        return x_TxD + mlp(self.ln2(x_TxD), key=mlp_key)
+        return x_TxD + mlp(vmap(self.ln2)(x_TxD), key=mlp_key)
 
 
 @dataclass
@@ -167,39 +167,3 @@ class GPT(eqx.Module):
         x_TxD = vmap(self.ln_f)(x_TxD)
         logits_TxV = vmap(self.lm_head)(x_TxD)
         return logits_TxV
-
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, key=None):
-        block_size = self.wpe.weight.shape[0]
-
-        def forward(x):
-            return self(x, inference=True)
-        # TODO: Move JIT outside this function. And move this function to sample.py.
-        batched_model = eqx.filter_jit(eqx.filter_vmap(forward))
-
-        if key is None:
-            key = jax.random.PRNGKey(0) # TODO check with ayz
-
-        for i in range(max_new_tokens):
-            # take the final block_size tokens for conditioning, if the sequence is too long
-            idx_cond = idx if idx.shape[1] <= block_size else idx[:, -block_size:]
-            pluck_T = idx.shape[1]-1
-            if idx_cond.shape[1] < block_size:
-                B, pad_T = idx_cond.shape[0], block_size - idx_cond.shape[1]
-                padding = jnp.zeros((B, pad_T), dtype=idx_cond.dtype)
-                idx_cond_new = jnp.concatenate([idx_cond, padding], axis=1)
-            else:
-                idx_cond_new = idx_cond
-
-            # take the forward pass
-            logits = batched_model(idx_cond_new)
-            # pluck the logits at the final step and scale by desired temperature
-            logits = logits[:, pluck_T, :] / temperature
-
-            # TODO: handle top_k
-
-            key, next_token_key = jrandom.split(key)
-            # sample from the distribution
-            idx_next = jax.random.categorical(next_token_key, logits, axis=1, shape=(idx.shape[0], 1))
-            # append sampled index to the running sequence and continue
-            idx = jnp.concatenate([idx, idx_next], axis=1)
-        return idx

@@ -6,6 +6,7 @@ import os
 import equinox as eqx
 import numpy as np
 import jax
+import jax.numpy as jnp
 from jax.experimental import mesh_utils
 import jax.random as jrandom
 import jmp
@@ -52,6 +53,33 @@ def from_json(json_path, dataclass_type):
     with open(json_path, "r") as f:
         json_string = f.read()
     return convert(json.loads(json_string), dataclass_type)
+
+
+def generate(model, idx, max_new_tokens, temperature=1.0, top_k=None, key=None):
+    block_size = model.wpe.weight.shape[0]
+    # TODO: Move JIT outside this function.
+    batched_model = eqx.filter_jit(eqx.filter_vmap(eqx.Partial(model, inference=True)))
+    for _ in range(max_new_tokens):
+        # take the final block_size tokens for conditioning, if the sequence is too long
+        idx_cond = idx if idx.shape[1] <= block_size else idx[:, -block_size:]
+        pluck_T = idx.shape[1]-1
+        if idx_cond.shape[1] < block_size:
+            B, pad_T = idx_cond.shape[0], block_size - idx_cond.shape[1]
+            padding = jnp.zeros((B, pad_T), dtype=idx_cond.dtype)
+            idx_cond_new = jnp.concatenate([idx_cond, padding], axis=1)
+        else:
+            idx_cond_new = idx_cond
+        # take the forward pass
+        logits = batched_model(idx_cond_new)
+        # pluck the logits at the final step and scale by desired temperature
+        logits = logits[:, pluck_T, :] / temperature
+        # TODO: handle top_k
+        key, next_token_key = jrandom.split(key)
+        # sample from the distribution
+        idx_next = jax.random.categorical(next_token_key, logits, axis=1, shape=(idx.shape[0], 1))
+        # append sampled index to the running sequence and continue
+        idx = jnp.concatenate([idx, idx_next], axis=1)
+    return idx
 
 
 # outputs/2023-11-25-00-52-09
@@ -117,7 +145,8 @@ model = jmp.get_policy(config.policy).cast_to_compute(model)
 key = jrandom.PRNGKey(0)
 for _ in range(cmd_args.num_samples):
     key, sample_key = jrandom.split(key)
-    y = model.generate(
+    y = generate(
+        model,
         x,
         cmd_args.max_new_tokens,
         temperature=cmd_args.temperature,
