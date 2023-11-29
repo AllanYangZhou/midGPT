@@ -40,9 +40,9 @@ def reinit_linear(layer: eqx.nn.Linear, key, w_std=0.02):
 
 
 class MLP(eqx.Module):
-    c_fc: eqx.Module
-    c_proj: eqx.Module
-    dropout: eqx.Module
+    c_fc: eqx.nn.Linear
+    c_proj: eqx.nn.Linear
+    dropout: eqx.nn.Dropout
 
     def __init__(self, n_embd, bias, dropout, c_proj_std, key):
         key1, key2 = jrandom.split(key)
@@ -60,10 +60,10 @@ class MLP(eqx.Module):
 class CausalSelfAttention(eqx.Module):
     n_head: int
     n_embd: int
-    c_attn: eqx.Module
-    c_proj: eqx.Module
-    attn_dropout: eqx.Module
-    resid_dropout: eqx.Module
+    c_attn: eqx.nn.Linear
+    c_proj: eqx.nn.Linear
+    attn_dropout: eqx.nn.Dropout
+    resid_dropout: eqx.nn.Dropout
 
     def __init__(self, n_embd, n_head, bias, dropout, c_proj_std, key):
         key1, key2 = jrandom.split(key)
@@ -100,8 +100,9 @@ class CausalSelfAttention(eqx.Module):
 class Block(eqx.Module):
     attn: CausalSelfAttention
     mlp: MLP
-    ln1: eqx.Module
-    ln2: eqx.Module
+    ln1: eqx.nn.LayerNorm
+    ln2: eqx.nn.LayerNorm
+
     def __init__(self, n_embd, n_head, bias, dropout, c_proj_std, key):
         key1, key2 = jrandom.split(key)
         self.attn = CausalSelfAttention(
@@ -135,12 +136,12 @@ class GPTConfig:
 
 
 class GPT(eqx.Module):
-    wte: eqx.Module
-    wpe: eqx.Module
-    drop: eqx.Module
-    blocks: tp.List[eqx.Module]
-    ln_f: eqx.Module
-    lm_head: eqx.Module
+    wte: Embedding
+    wpe: Embedding
+    drop: eqx.nn.Dropout
+    blocks: tp.List[Block]
+    ln_f: eqx.nn.LayerNorm
+    lm_head: eqx.nn.Linear
     n_layer: int
 
     def __init__(self, config, key):
@@ -187,12 +188,8 @@ def count_params(model: GPT) -> int:
 def shard_gpt(model: GPT, mesh: Mesh, sharding_fn=with_sharding_constraint) -> eqx.Module:
     """Shard model parameters over devices (TPUs or GPUs)."""
     def sharding_map(x: Array) -> NamedSharding:
-        if x.ndim == 3:
-            return NamedSharding(mesh, P(None, None, 'data'))
-        elif x.ndim == 2:
-            return NamedSharding(mesh, P(None, 'data'))
-        else:
-            return NamedSharding(mesh, P('data',))
+        axes = (None,) * (x.ndim - 1) + ('data',)
+        return NamedSharding(mesh, P(*axes))
     dynamic_model, static_model = eqx.partition(model, eqx.is_array)
     dynamic_model = jtu.tree_map(lambda x: sharding_fn(x, sharding_map(x)), dynamic_model)
     return eqx.combine(dynamic_model, static_model)

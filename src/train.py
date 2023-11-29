@@ -115,8 +115,7 @@ def make_training_fns(
 
 def train(config: ExperimentConfig):
     writer = SummaryWriter(os.path.join(config.rundir, 'logs'), flush_secs=30)
-    devices = jax.devices()
-    mesh = Mesh(mesh_utils.create_device_mesh((len(devices),)), axis_names=('data',))
+    mesh = Mesh(mesh_utils.create_device_mesh((jax.device_count(),)), axis_names=('data',))
 
     train_data = np.memmap(os.path.join(config.data_dir, 'train.bin'), dtype=np.uint16, mode='r')
     val_data = np.memmap(os.path.join(config.data_dir, 'val.bin'), dtype=np.uint16, mode='r')
