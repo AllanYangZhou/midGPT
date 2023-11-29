@@ -177,7 +177,7 @@ class GPT(eqx.Module):
         #     return block(_x_TxD, inference=inference, key=_key), None
         # x_TxD, _ = jax.lax.scan(block_fn, x_TxD, (dynamic_blocks, block_keys))
         for block, bkey in zip(self.blocks, block_keys):
-            x_TxD = block(x_TxD, key=bkey)
+            x_TxD = block(x_TxD, inference=inference, key=bkey)
         x_TxD = vmap(self.ln_f)(x_TxD)
         logits_TxV = vmap(self.lm_head)(x_TxD)
         return logits_TxV
