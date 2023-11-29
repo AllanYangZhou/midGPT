@@ -5,6 +5,8 @@ import equinox as eqx
 import jax
 
 jnp, jrandom, vmap, Array = jax.numpy, jax.random, jax.vmap, jax.Array
+P, NamedSharding = jax.sharding.PartitionSpec, jax.sharding.NamedSharding
+Mesh, with_sharding_constraint = jax.sharding.Mesh, jax.lax.with_sharding_constraint
 
 
 class Embedding(eqx.Module):
@@ -167,3 +169,33 @@ class GPT(eqx.Module):
         x_TxD = vmap(self.ln_f)(x_TxD)
         logits_TxV = vmap(self.lm_head)(x_TxD)
         return logits_TxV
+
+
+def count_params(model: GPT) -> int:
+    dupe = jnp.size(model.lm_head.weight)  # embedding and final layer are shared.
+    tot = sum([jnp.size(x) for x in jax.tree_leaves(model) if isinstance(x, jax.Array)])
+    return tot - dupe - jnp.size(model.wpe.weight)  # non-embedding only.
+
+
+def get_layers(model: GPT, layer_cls: tp.Type[eqx.Module]) -> tp.Iterable[eqx.Module]:
+    """Get all layers of model matching layer_cls."""
+    matches_cls = lambda x: isinstance(x, layer_cls)
+    return filter(lambda x: matches_cls(x), jax.tree_leaves(model, is_leaf=matches_cls))
+
+
+def shard_gpt(model: GPT, mesh: Mesh, sharding_fn=with_sharding_constraint) -> eqx.Module:
+    """Shard model parameters over devices (TPUs or GPUs)."""
+    # TODO: I think we can just have shardings for matrices and vectors, instead of by Module.
+    lin_sharding = NamedSharding(mesh, P(None, 'data'))
+    ln_sharding = NamedSharding(mesh, P('data',))
+    get_lin_wts = lambda m: [l.weight for l in get_layers(m, (eqx.nn.Linear, Embedding))]
+    sharded_lin_wts = [sharding_fn(w, lin_sharding) for w in get_lin_wts(model)]
+    model = eqx.tree_at(get_lin_wts, model, sharded_lin_wts)
+
+    get_ln_wts = lambda m: [l.weight for l in get_layers(m, eqx.nn.LayerNorm)]
+    sharded_ln_wts = [sharding_fn(w, ln_sharding) for w in get_ln_wts(model)]
+    model = eqx.tree_at(get_ln_wts, model, sharded_ln_wts)
+
+    n_wts = len([x for x in jax.tree_leaves(model) if isinstance(x, jax.Array)])
+    assert n_wts == len(sharded_lin_wts) + len(sharded_ln_wts), 'Some parameters are not being sharded!'
+    return model

@@ -11,15 +11,14 @@ import orbax.checkpoint as ocp
 import numpy as np
 from tensorboardX import SummaryWriter
 from tqdm import trange
-from .model import GPT, GPTConfig, Embedding
+from .model import GPT, GPTConfig, shard_gpt, count_params
 
 jax.config.update("jax_threefry_partitionable", True)
 
-jnp, jrandom, vmap, scan = jax.numpy, jax.random, jax.vmap, jax.lax.scan
-P, KeyArray = jax.sharding.PartitionSpec, tp.Any
-jtu, NamedSharding = jax.tree_util, jax.sharding.NamedSharding
-with_sharding_constraint = jax.lax.with_sharding_constraint
-Array, Mesh = jax.Array, jax.sharding.Mesh
+jnp, jrandom, vmap, scan, jtu = jax.numpy, jax.random, jax.vmap, jax.lax.scan, jax.tree_util
+Array, KeyArray = jax.Array, tp.Any
+Mesh, NamedSharding = jax.sharding.Mesh, jax.sharding.NamedSharding
+P, with_sharding_constraint = jax.sharding.PartitionSpec, jax.lax.with_sharding_constraint
 
 
 @dataclass
@@ -35,7 +34,7 @@ class ExperimentConfig:
     beta2: float
     weight_decay: float
     eval_interval: int
-    policy: str
+    policy: str  # JMP mixed precision policy string
     g_accum_iters: int  # Accumulate this many grads before step
     shard_model: bool
     model_config: GPTConfig
@@ -114,39 +113,9 @@ def make_training_fns(
     return step, evaluate
 
 
-def get_layers(model: GPT, layer_cls: tp.Type[eqx.Module]) -> tp.Iterable[eqx.Module]:
-    """Get all layers of model matching layer_cls."""
-    matches_cls = lambda x: isinstance(x, layer_cls)
-    return filter(lambda x: matches_cls(x), jtu.tree_leaves(model, is_leaf=matches_cls))
-
-
-def count_params(model: GPT) -> int:
-    dupe = jnp.size(model.lm_head.weight)  # embedding and final layer are shared.
-    tot = sum([jnp.size(x) for x in jtu.tree_leaves(model) if isinstance(x, jax.Array)])
-    return tot - dupe - jnp.size(model.wpe.weight)  # non-embedding only.
-
-
-def shard_gpt(model: GPT, mesh: Mesh, sharding_fn=with_sharding_constraint) -> eqx.Module:
-    """Shard model parameters over devices (TPUs or GPUs)."""
-    lin_sharding = NamedSharding(mesh, P(None, 'data'))
-    ln_sharding = NamedSharding(mesh, P('data',))
-    get_lin_wts = lambda m: [l.weight for l in get_layers(m, (eqx.nn.Linear, Embedding))]
-    sharded_lin_wts = [sharding_fn(w, lin_sharding) for w in get_lin_wts(model)]
-    model = eqx.tree_at(get_lin_wts, model, sharded_lin_wts)
-
-    get_ln_wts = lambda m: [l.weight for l in get_layers(m, eqx.nn.LayerNorm)]
-    sharded_ln_wts = [sharding_fn(w, ln_sharding) for w in get_ln_wts(model)]
-    model = eqx.tree_at(get_ln_wts, model, sharded_ln_wts)
-
-    n_wts = len([x for x in jtu.tree_leaves(model) if isinstance(x, jax.Array)])
-    assert n_wts == len(sharded_lin_wts) + len(sharded_ln_wts), 'Some parameters are not being sharded!'
-    return model
-
-
 def train(config: ExperimentConfig):
     writer = SummaryWriter(os.path.join(config.rundir, 'logs'), flush_secs=30)
     devices = jax.devices()
-    print(devices)
     mesh = Mesh(mesh_utils.create_device_mesh((len(devices),)), axis_names=('data',))
 
     train_data = np.memmap(os.path.join(config.data_dir, 'train.bin'), dtype=np.uint16, mode='r')
