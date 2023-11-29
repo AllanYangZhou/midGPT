@@ -5,6 +5,7 @@ import equinox as eqx
 import jax
 
 jnp, jrandom, vmap, Array, jtu = jax.numpy, jax.random, jax.vmap, jax.Array, jax.tree_util
+KeyArray = jax.Array
 P, NamedSharding = jax.sharding.PartitionSpec, jax.sharding.NamedSharding
 Mesh, with_sharding_constraint = jax.sharding.Mesh, jax.lax.with_sharding_constraint
 
@@ -160,14 +161,14 @@ class GPT(eqx.Module):
     @jax.named_scope('gpt')
     def __call__(self, x_T, inference=False, key=None):
         # Either (inference=False and key) or (inference=True and key=None)
-        drop_key, block_keys = None, (None,) * self.n_layer
+        drop_key, block_keys = None, None
         if key is not None:
             drop_key, block_keys = jrandom.split(key)
             block_keys = jrandom.split(block_keys, self.n_layer)
         x_TxD = self.wte(x_T) + self.wpe(jnp.arange(x_T.shape[0]))
         x_TxD = self.drop(x_TxD, inference=inference, key=drop_key)
         dynamic_blocks, static_blocks = eqx.partition(self.blocks, eqx.is_array)
-        def block_fn(_x_TxD, block_and_key):
+        def block_fn(_x_TxD: Array, block_and_key: tp.Tuple[GPT, tp.Optional[KeyArray]]):
             _dynamic_block, _key = block_and_key
             block = eqx.combine(_dynamic_block, static_blocks)
             return block(_x_TxD, inference=inference, key=_key), None
