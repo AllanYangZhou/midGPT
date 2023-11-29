@@ -151,7 +151,9 @@ class GPT(eqx.Module):
         c_proj_std = 0.02 / math.sqrt(2 * config.n_layer)
         def make_block(_key):
             return Block(config.n_embd, config.n_head, config.bias, config.dropout, c_proj_std, _key)
-        self.blocks = eqx.filter_vmap(make_block)(jrandom.split(block_key, config.n_layer))
+        self.blocks = [make_block(k) for k in jrandom.split(block_key, config.n_layer)]
+        # TODO: scan over blocks speeds up JIT, but messes with sharding somehow.
+        # self.blocks = eqx.filter_vmap(make_block)(jrandom.split(block_key, config.n_layer))
         self.ln_f = eqx.nn.LayerNorm(config.n_embd, eps=1e-5, use_bias=config.bias)
         self.lm_head = reinit_linear(eqx.nn.Linear(
             config.n_embd, config.vocab_size, use_bias=config.bias, key=head_key), head_key)
@@ -162,18 +164,20 @@ class GPT(eqx.Module):
     @jax.named_scope('gpt')
     def __call__(self, x_T, inference=False, key=None):
         # Either (inference=False and key) or (inference=True and key=None)
-        drop_key, block_keys = None, None
+        drop_key, block_keys = None, (None,) * self.n_layer  # block_keys=None if scanning
         if key is not None:
             drop_key, block_keys = jrandom.split(key)
             block_keys = jrandom.split(block_keys, self.n_layer)
         x_TxD = self.wte(x_T) + self.wpe(jnp.arange(x_T.shape[0]))
         x_TxD = self.drop(x_TxD, inference=inference, key=drop_key)
-        dynamic_blocks, static_blocks = eqx.partition(self.blocks, eqx.is_array)
-        def block_fn(_x_TxD: Array, block_and_key: tp.Tuple[GPT, tp.Optional[KeyArray]]):
-            _dynamic_block, _key = block_and_key
-            block = eqx.combine(_dynamic_block, static_blocks)
-            return block(_x_TxD, inference=inference, key=_key), None
-        x_TxD, _ = jax.lax.scan(block_fn, x_TxD, (dynamic_blocks, block_keys))
+        # dynamic_blocks, static_blocks = eqx.partition(self.blocks, eqx.is_array)
+        # def block_fn(_x_TxD: Array, block_and_key: tp.Tuple[GPT, tp.Optional[KeyArray]]):
+        #     _dynamic_block, _key = block_and_key
+        #     block = eqx.combine(_dynamic_block, static_blocks)
+        #     return block(_x_TxD, inference=inference, key=_key), None
+        # x_TxD, _ = jax.lax.scan(block_fn, x_TxD, (dynamic_blocks, block_keys))
+        for block, bkey in zip(self.blocks, block_keys):
+            x_TxD = block(x_TxD, key=bkey)
         x_TxD = vmap(self.ln_f)(x_TxD)
         logits_TxV = vmap(self.lm_head)(x_TxD)
         return logits_TxV
