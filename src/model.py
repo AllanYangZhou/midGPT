@@ -23,8 +23,8 @@ class Embedding(eqx.Module):
         self.embedding_size = embedding_size
 
     @jax.named_scope("Embedding")
-    def __call__(self, x, *, key=None):  # x: (T,)
-        return jnp.take(self.weight, x, axis=0)
+    def __call__(self, x_T, *, key=None):
+        return jnp.take(self.weight, x_T, axis=0)
 
 
 def reinit_linear(layer: eqx.nn.Linear, key, w_std=0.02):
@@ -49,9 +49,9 @@ class MLP(eqx.Module):
         self.dropout = eqx.nn.Dropout(dropout)
 
     @jax.named_scope('mlp')
-    def __call__(self, x, inference=False, key=None):
-        x = jax.nn.gelu(self.c_fc(x))
-        return self.dropout(self.c_proj(x), inference=inference, key=key)
+    def __call__(self, x_D, inference=False, key=None):
+        x_D = jax.nn.gelu(self.c_fc(x_D))
+        return self.dropout(self.c_proj(x_D), inference=inference, key=key)
 
 
 class CausalSelfAttention(eqx.Module):
@@ -73,27 +73,25 @@ class CausalSelfAttention(eqx.Module):
         self.resid_dropout = eqx.nn.Dropout(dropout)
 
     @jax.named_scope('causal_sa')
-    def __call__(self, x, inference=False, key=None):
-        attndrop_key, projdrop_key = jrandom.split(key) if key is not None else (None, None)
-        T, C = x.shape
-        qkv = vmap(self.c_attn)(x)  # (T, 3 * C)
-        q, k, v = jnp.split(qkv, 3, axis=-1)  # (T, C)
-        n_per_head = self.n_embd // self.n_head
-        # (T, C) -> (n_head, T, n_per_head)
-        q = jnp.transpose(jnp.reshape(q, (T, self.n_head, n_per_head)), (1, 0, 2))
-        k = jnp.transpose(jnp.reshape(k, (T, self.n_head, n_per_head)), (1, 0, 2))
-        v = jnp.transpose(jnp.reshape(v, (T, self.n_head, n_per_head)), (1, 0, 2))
-        att = q @ jnp.transpose(k, (0, 2, 1))  # (n_head, T, T)
+    def __call__(self, x_TxD, inference=False, key=None):
+        adrop_key, pdrop_key = jrandom.split(key) if key is not None else (None, None)
+        T, D = x_TxD.shape
+        Q_TxD, K_TxD, V_TxD = jnp.split(vmap(self.c_attn)(x_TxD), 3, axis=-1)
+        C = self.n_embd // self.n_head
+        Q_HxTxC = jnp.transpose(jnp.reshape(Q_TxD, (T, self.n_head, C)), (1, 0, 2))
+        K_HxTxC = jnp.transpose(jnp.reshape(K_TxD, (T, self.n_head, C)), (1, 0, 2))
+        V_HxTxC = jnp.transpose(jnp.reshape(V_TxD, (T, self.n_head, C)), (1, 0, 2))
+        A_HxTxT = Q_HxTxC @ jnp.transpose(K_HxTxC, (0, 2, 1))
         causal_mask = jnp.tril(jnp.ones((1, T, T))) == 0
-        att = jnp.where(causal_mask, float('-inf'), att)
+        A_HxTxT = jnp.where(causal_mask, float('-inf'), A_HxTxT)
         # Softmax should be in full precision.
-        orig_dtype = att.dtype
-        att = jax.nn.softmax(att.astype(jnp.float32) / jnp.sqrt(n_per_head), axis=-1)
-        att = att.astype(orig_dtype)
-        att = self.attn_dropout(att, inference=inference, key=attndrop_key)
-        out = jnp.reshape(jnp.transpose(att @ v, (1, 0, 2)), (T, C))
-        out = self.resid_dropout(vmap(self.c_proj)(out), inference=inference, key=projdrop_key)
-        return out
+        orig_dtype = A_HxTxT.dtype
+        A_HxTxT = jax.nn.softmax(A_HxTxT.astype(jnp.float32) / jnp.sqrt(C), axis=-1)
+        A_HxTxT = A_HxTxT.astype(orig_dtype)
+        A_HxTxT = self.attn_dropout(A_HxTxT, inference=inference, key=adrop_key)
+        out_TxD = jnp.reshape(jnp.transpose(A_HxTxT @ V_HxTxC, (1, 0, 2)), (T, D))
+        out_TxD = self.resid_dropout(vmap(self.c_proj)(out_TxD), inference=inference, key=pdrop_key)
+        return out_TxD
 
 
 class Block(eqx.Module):
@@ -108,18 +106,18 @@ class Block(eqx.Module):
             key=key1)
         self.mlp = MLP(
             n_embd=n_embd, bias=bias, dropout=dropout, c_proj_std=c_proj_std, key=key2)
-        self.ln1 = eqx.nn.LayerNorm(n_embd, eps=1e-5, use_bias=bias)
-        self.ln2 = eqx.nn.LayerNorm(n_embd, eps=1e-5, use_bias=bias)
+        self.ln1 = vmap(eqx.nn.LayerNorm(n_embd, eps=1e-5, use_bias=bias))
+        self.ln2 = vmap(eqx.nn.LayerNorm(n_embd, eps=1e-5, use_bias=bias))
 
     @jax.named_scope('block')
-    def __call__(self, x, inference=False, key=None):
+    def __call__(self, x_TxD, inference=False, key=None):
         attn_key, mlp_key = (None, None)
         if key is not None:
             attn_key, mlp_key = jrandom.split(key)
-            mlp_key = jrandom.split(mlp_key, x.shape[0])
-        ln1, ln2 = vmap(self.ln1), vmap(self.ln2)
-        x = x + self.attn(ln1(x), inference=inference, key=attn_key)
-        return x + vmap(eqx.Partial(self.mlp, inference=inference))(ln2(x), key=mlp_key)
+            mlp_key = jrandom.split(mlp_key, x_TxD.shape[0])
+        x_TxD = x_TxD + self.attn(self.ln1(x_TxD), inference=inference, key=attn_key)
+        mlp = vmap(eqx.Partial(self.mlp, inference=inference))
+        return x_TxD + mlp(self.ln2(x_TxD), key=mlp_key)
 
 
 @dataclass
@@ -156,19 +154,19 @@ class GPT(eqx.Module):
         self.wpe = Embedding(config.block_size, config.n_embd, weight=wpe_wt)
 
     @jax.named_scope('gpt')
-    def __call__(self, x, inference=False, key=None):  # (T,)
+    def __call__(self, x_T, inference=False, key=None):
         # Either (inference=False and key) or (inference=True and key=None)
         drop_key, block_keys = None, (None,) * len(self.blocks)
         if key is not None:
             drop_key, block_keys = jrandom.split(key)
             block_keys = jrandom.split(block_keys, len(self.blocks))
-        x = self.wte(x) + self.wpe(jnp.arange(x.shape[0]))
-        x = self.drop(x, inference=inference, key=drop_key)
+        x_TxD = self.wte(x_T) + self.wpe(jnp.arange(x_T.shape[0]))
+        x_TxD = self.drop(x_TxD, inference=inference, key=drop_key)
         for block_key, block in zip(block_keys, self.blocks):
-            x = block(x, inference=inference, key=block_key)
-        x = vmap(self.ln_f)(x)
-        logits = vmap(self.lm_head)(x)
-        return logits  # (T, vocab_size)
+            x_TxD = block(x_TxD, inference=inference, key=block_key)
+        x_TxD = vmap(self.ln_f)(x_TxD)
+        logits_TxV = vmap(self.lm_head)(x_TxD)
+        return logits_TxV
 
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, key=None):
         block_size = self.wpe.weight.shape[0]

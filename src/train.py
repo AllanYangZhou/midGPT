@@ -98,15 +98,15 @@ def make_training_fns(
         model_params, model_static = eqx.partition(model, eqx.is_array)
         return loss_fn(model_params, model_static, x, y, key)
 
-    data_sharding = NamedSharding(mesh, P('data', None))
+    data_sharding = NamedSharding(mesh, P('data', None))  # (B, D)
     def evaluate(model: GPT, data: np.ndarray) -> Array:
         model = policy.cast_to_compute(model)
         model = eqx.Partial(model, inference=True)
         tot_loss = jnp.zeros(())
         for i in range(200):
-            x, y = get_batch(data, config.model_config.block_size, config.batch_size)
-            x, y = jax.device_put((x, y), data_sharding)
-            loss = simple_loss(model, x, y, None)
+            x_BxD, y_BxD = get_batch(data, config.model_config.block_size, config.batch_size)
+            x_BxD, y_BxD = jax.device_put((x_BxD, y_BxD), data_sharding)
+            loss = simple_loss(model, x_BxD, y_BxD, None)
             tot_loss = tot_loss + loss
         return tot_loss / 200
 
@@ -193,7 +193,7 @@ def train(config: ExperimentConfig):
         model = jtu.tree_unflatten(jtu.tree_structure(model), model_leaves)
         opt_state = jtu.tree_unflatten(jtu.tree_structure(opt_state), opt_state_leaves)
         first_step = mngr.latest_step() + 1
-    data_sharding = NamedSharding(mesh, P(None, 'data', None))  # (G, BS, d)
+    data_sharding = NamedSharding(mesh, P(None, 'data', None))  # (G, B, D)
     postfix_values = {}  # values to display in the progress bar
     pbar = trange(first_step, config.max_steps, initial=first_step, total=config.max_steps)
     for itr in pbar:
@@ -205,12 +205,12 @@ def train(config: ExperimentConfig):
             writer.add_scalar('loss/train', train_loss, itr)
             writer.add_scalar('loss/val', val_loss, itr)
         key, key1 = jrandom.split(key)
-        x, y = get_batch(
+        x_GxBxD, y_GxBxD = get_batch(
             train_data, config.model_config.block_size, config.batch_size, config.g_accum_iters
         )
         if itr == 1: jax.profiler.start_trace(os.path.join(config.rundir, 'logs'))
-        x, y = jax.device_put((x, y), data_sharding)
-        model, opt_state, loss = step(model, opt_state, x, y, key1)
+        x_GxBxD, y_GxBxD = jax.device_put((x_GxBxD, y_GxBxD), data_sharding)
+        model, opt_state, loss = step(model, opt_state, x_GxBxD, y_GxBxD, key1)
         if itr == 1: loss.block_until_ready(); jax.profiler.stop_trace()
         if not config.debug: mngr.save(itr, (jtu.tree_leaves(model), jtu.tree_leaves(opt_state)))
         postfix_values['loss'] = loss.item()
