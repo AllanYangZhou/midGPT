@@ -4,7 +4,7 @@ import typing as tp
 import equinox as eqx
 import jax
 
-jnp, jrandom, vmap, Array = jax.numpy, jax.random, jax.vmap, jax.Array
+jnp, jrandom, vmap, Array, jtu = jax.numpy, jax.random, jax.vmap, jax.Array, jax.tree_util
 P, NamedSharding = jax.sharding.PartitionSpec, jax.sharding.NamedSharding
 Mesh, with_sharding_constraint = jax.sharding.Mesh, jax.lax.with_sharding_constraint
 
@@ -140,14 +140,16 @@ class GPT(eqx.Module):
     blocks: tp.List[eqx.Module]
     ln_f: eqx.Module
     lm_head: eqx.Module
+    n_layer: int
 
     def __init__(self, config, key):
+        self.n_layer = config.n_layer
         block_key, head_key, wpe_key = jrandom.split(key, 3)
         self.drop = eqx.nn.Dropout(config.dropout)
         c_proj_std = 0.02 / math.sqrt(2 * config.n_layer)
-        self.blocks = [Block(
-            config.n_embd, config.n_head, config.bias, config.dropout, c_proj_std, bkey
-        ) for bkey in jrandom.split(block_key, config.n_layer)]
+        def make_block(_key):
+            return Block(config.n_embd, config.n_head, config.bias, config.dropout, c_proj_std, _key)
+        self.blocks = eqx.filter_vmap(make_block)(jrandom.split(block_key, config.n_layer))
         self.ln_f = eqx.nn.LayerNorm(config.n_embd, eps=1e-5, use_bias=config.bias)
         self.lm_head = reinit_linear(eqx.nn.Linear(
             config.n_embd, config.vocab_size, use_bias=config.bias, key=head_key), head_key)
@@ -158,14 +160,18 @@ class GPT(eqx.Module):
     @jax.named_scope('gpt')
     def __call__(self, x_T, inference=False, key=None):
         # Either (inference=False and key) or (inference=True and key=None)
-        drop_key, block_keys = None, (None,) * len(self.blocks)
+        drop_key, block_keys = None, (None,) * self.n_layer
         if key is not None:
             drop_key, block_keys = jrandom.split(key)
-            block_keys = jrandom.split(block_keys, len(self.blocks))
+            block_keys = jrandom.split(block_keys, self.n_layer)
         x_TxD = self.wte(x_T) + self.wpe(jnp.arange(x_T.shape[0]))
         x_TxD = self.drop(x_TxD, inference=inference, key=drop_key)
-        for block_key, block in zip(block_keys, self.blocks):
-            x_TxD = block(x_TxD, inference=inference, key=block_key)
+        dynamic_blocks, static_blocks = eqx.partition(self.blocks, eqx.is_array)
+        def block_fn(_x_TxD, block_and_key):
+            _dynamic_block, _key = block_and_key
+            block = eqx.combine(_dynamic_block, static_blocks)
+            return block(_x_TxD, inference=inference, key=_key), None
+        x_TxD, _ = jax.lax.scan(block_fn, x_TxD, (dynamic_blocks, block_keys))
         x_TxD = vmap(self.ln_f)(x_TxD)
         logits_TxV = vmap(self.lm_head)(x_TxD)
         return logits_TxV
@@ -173,29 +179,19 @@ class GPT(eqx.Module):
 
 def count_params(model: GPT) -> int:
     dupe = jnp.size(model.lm_head.weight)  # embedding and final layer are shared.
-    tot = sum([jnp.size(x) for x in jax.tree_leaves(model) if isinstance(x, jax.Array)])
+    tot = sum([jnp.size(x) for x in jtu.tree_leaves(model) if isinstance(x, jax.Array)])
     return tot - dupe - jnp.size(model.wpe.weight)  # non-embedding only.
-
-
-def get_layers(model: GPT, layer_cls: tp.Type[eqx.Module]) -> tp.Iterable[eqx.Module]:
-    """Get all layers of model matching layer_cls."""
-    matches_cls = lambda x: isinstance(x, layer_cls)
-    return filter(lambda x: matches_cls(x), jax.tree_leaves(model, is_leaf=matches_cls))
 
 
 def shard_gpt(model: GPT, mesh: Mesh, sharding_fn=with_sharding_constraint) -> eqx.Module:
     """Shard model parameters over devices (TPUs or GPUs)."""
-    # TODO: I think we can just have shardings for matrices and vectors, instead of by Module.
-    lin_sharding = NamedSharding(mesh, P(None, 'data'))
-    ln_sharding = NamedSharding(mesh, P('data',))
-    get_lin_wts = lambda m: [l.weight for l in get_layers(m, (eqx.nn.Linear, Embedding))]
-    sharded_lin_wts = [sharding_fn(w, lin_sharding) for w in get_lin_wts(model)]
-    model = eqx.tree_at(get_lin_wts, model, sharded_lin_wts)
-
-    get_ln_wts = lambda m: [l.weight for l in get_layers(m, eqx.nn.LayerNorm)]
-    sharded_ln_wts = [sharding_fn(w, ln_sharding) for w in get_ln_wts(model)]
-    model = eqx.tree_at(get_ln_wts, model, sharded_ln_wts)
-
-    n_wts = len([x for x in jax.tree_leaves(model) if isinstance(x, jax.Array)])
-    assert n_wts == len(sharded_lin_wts) + len(sharded_ln_wts), 'Some parameters are not being sharded!'
-    return model
+    def sharding_map(x: Array) -> NamedSharding:
+        if x.ndim == 3:
+            return NamedSharding(mesh, P(None, None, 'data'))
+        elif x.ndim == 2:
+            return NamedSharding(mesh, P(None, 'data'))
+        else:
+            return NamedSharding(mesh, P('data',))
+    dynamic_model, static_model = eqx.partition(model, eqx.is_array)
+    dynamic_model = jtu.tree_map(lambda x: sharding_fn(x, sharding_map(x)), dynamic_model)
+    return eqx.combine(dynamic_model, static_model)
