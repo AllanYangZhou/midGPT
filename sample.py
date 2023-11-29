@@ -18,10 +18,9 @@ from src.model import GPT
 import tiktoken
 
 jtu = jax.tree_util
-
-
 NamedSharding, Mesh = jax.sharding.NamedSharding, jax.sharding.Mesh
 P = jax.sharding.PartitionSpec
+
 
 parser = argparse.ArgumentParser()
 # outputs directory, e.g., outputs/2023-11-25-00-52-09
@@ -57,8 +56,8 @@ def from_json(json_path, dataclass_type):
 
 def generate(model, idx, max_new_tokens, temperature=1.0, top_k=None, key=None):
     block_size = model.wpe.weight.shape[0]
-    # TODO: Move JIT outside this function.
-    batched_model = eqx.filter_jit(eqx.filter_vmap(eqx.Partial(model, inference=True)))
+    # TODO: Move JIT outside this function?
+    batched_model = eqx.filter_jit(jax.vmap(eqx.Partial(model, inference=True)))
     for _ in range(max_new_tokens):
         # take the final block_size tokens for conditioning, if the sequence is too long
         idx_cond = idx if idx.shape[1] <= block_size else idx[:, -block_size:]
@@ -82,14 +81,10 @@ def generate(model, idx, max_new_tokens, temperature=1.0, top_k=None, key=None):
     return idx
 
 
-# outputs/2023-11-25-00-52-09
 # load the model
 config_path: str = os.path.join(cmd_args.ckpt_dir, "config.json")
 config: ExperimentConfig = from_json(config_path, ExperimentConfig)
 eqx.tree_pprint(config)
-
-devices = jax.devices()
-print(devices)
 
 options = ocp.CheckpointManagerOptions(
     max_to_keep=1, save_interval_steps=config.eval_interval
@@ -133,6 +128,7 @@ if start.startswith("FILE:"):
 start_ids = encode(start)
 x = np.array([start_ids])
 
+devices = jax.devices()
 mesh = Mesh(mesh_utils.create_device_mesh((len(devices),)), axis_names=("data",))
 # TODO: currently replicating all data. Shard data properly.
 data_sharding = NamedSharding(mesh, P(None, None))
