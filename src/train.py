@@ -69,22 +69,20 @@ def make_training_fns(
         return loss.mean().astype(orig_dtype)
 
     @partial(eqx.filter_jit, donate='all')
-    def step(model: GPT, opt_state, x: Array, y: Array, key: KeyArray):
+    def step(model: GPT, opt_state, x_GxBxT: Array, y_GxBxT: Array, key: KeyArray):
         G = config.g_accum_iters
         # put params in compute dtype (probably bfloat16), and split params out
         model_params, model_static = eqx.partition(policy.cast_to_compute(model), eqx.is_array)
-        # compute loss and grad and microbatch g, then scan over microbatches.
-        def accum_loss_grad(loss_and_grad, xykey_g: tp.Tuple[Array, Array, KeyArray]):
-            loss_so_far, grad_so_far = loss_and_grad
-            loss_g, grad_g = jax.value_and_grad(loss_fn)(model_params, model_static, *xykey_g)
-            loss_so_far = loss_so_far + loss_g
-            grad_so_far = jtu.tree_map(lambda x, y: x + y, grad_g, grad_so_far)
-            return (loss_so_far, grad_so_far), None
+        # compute loss and grad on microbatch, then scan over microbatches
+        def microstep(grad_so_far, xykey_g: tp.Tuple[Array, Array, KeyArray]):
+            loss, grad = jax.value_and_grad(loss_fn)(model_params, model_static, *xykey_g)
+            grad_so_far = jtu.tree_map(lambda x, y: x + y, grad, grad_so_far)
+            return grad_so_far, loss
         all_keys = jrandom.split(key, config.g_accum_iters)
-        init_loss_grad = (jnp.zeros(()), jax.tree_map(jnp.zeros_like, model_params))
-        (loss, grad), _ = scan(accum_loss_grad, init_loss_grad, (x, y, all_keys))
-        # Loss and grad were accumulated (summed) over G, so divide.
-        loss, grad = loss / G, jtu.tree_map(lambda x: x / G, grad)
+        init_grad = jtu.tree_map(jnp.zeros_like, model_params)
+        grad, loss_G = scan(microstep, init_grad, (x_GxBxT, y_GxBxT, all_keys))
+        # Grad accumulated (summed) over G, so divide.
+        loss, grad = jnp.mean(loss_G, axis=0), jtu.tree_map(lambda x: x / G, grad)
         # put grad back in params dtype
         grad = policy.cast_to_param(grad)
         if config.shard_model: grad = shard_gpt(grad, mesh)
