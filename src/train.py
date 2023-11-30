@@ -101,12 +101,13 @@ def make_training_fns(
         model = policy.cast_to_compute(model)
         model = eqx.Partial(model, inference=True)
         tot_loss = jnp.zeros(())
-        for i in range(200):
+        num_eval_steps = 1 if config.debug else 200
+        for i in range(num_eval_steps):
             x_BxD, y_BxD = get_batch(data, config.model_config.block_size, config.batch_size)
             x_BxD, y_BxD = jax.device_put((x_BxD, y_BxD), data_sharding)
             loss = simple_loss(model, x_BxD, y_BxD, None)
             tot_loss = tot_loss + loss
-        return tot_loss / 200
+        return tot_loss / num_eval_steps
 
     return step, evaluate
 
@@ -157,7 +158,7 @@ def train(config: ExperimentConfig):
     postfix_values = {}  # values to display in the progress bar
     pbar = trange(first_step, config.max_steps, initial=first_step, total=config.max_steps)
     for itr in pbar:
-        if not config.debug and (itr % config.eval_interval == 0):
+        if itr % config.eval_interval == 0:
             train_loss = evaluate(model, train_data).item()
             val_loss = evaluate(model, val_data).item()
             postfix_values['train_loss'] = train_loss
@@ -168,10 +169,12 @@ def train(config: ExperimentConfig):
         x_GxBxD, y_GxBxD = get_batch(
             train_data, config.model_config.block_size, config.batch_size, config.g_accum_iters
         )
-        if itr == 1: jax.profiler.start_trace(os.path.join(config.rundir, 'logs'))
+        if config.debug and itr == 0:
+            jax.profiler.start_trace(os.path.join(config.rundir, 'logs'))
         x_GxBxD, y_GxBxD = jax.device_put((x_GxBxD, y_GxBxD), data_sharding)
         model, opt_state, loss = step(model, opt_state, x_GxBxD, y_GxBxD, key1)
-        if itr == 1: loss.block_until_ready(); jax.profiler.stop_trace()
+        if config.debug and itr == 0:
+            loss.block_until_ready(); jax.profiler.stop_trace()
         if not config.debug: mngr.save(itr, (jtu.tree_leaves(model), jtu.tree_leaves(opt_state)))
         postfix_values['loss'] = loss.item()
         postfix_values['lr'] = scheduler(opt_state[3].count).item()
