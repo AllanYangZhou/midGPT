@@ -76,6 +76,7 @@ def make_training_fns(
         # compute loss and grad on microbatch, then scan over microbatches
         def microstep(grad_so_far, xykey_g: tp.Tuple[Array, Array, KeyArray]):
             loss, grad = jax.value_and_grad(loss_fn)(model_params, model_static, *xykey_g)
+            if config.shard_model: grad = shard_gpt(grad, mesh)
             grad_so_far = jtu.tree_map(lambda x, y: x + y, grad, grad_so_far)
             return grad_so_far, loss
         all_keys = jrandom.split(key, config.g_accum_iters)
@@ -85,7 +86,6 @@ def make_training_fns(
         loss, grad = jnp.mean(loss_G, axis=0), jtu.tree_map(lambda x: x / G, grad)
         # put grad back in params dtype
         grad = policy.cast_to_param(grad)
-        if config.shard_model: grad = shard_gpt(grad, mesh)
         updates, opt_state = optimizer.update(grad, opt_state, model)
         model = eqx.apply_updates(model, updates)
         return model, opt_state, loss
