@@ -30,25 +30,15 @@ class Embedding(eqx.Module):
         return jnp.take(self.weight, x_T, axis=0)
 
 
-def reinit_linear(layer: eqx.nn.Linear, key, w_std=0.02):
-    weight = jrandom.normal(key, layer.weight.shape) * w_std
-    layer = eqx.tree_at(lambda layer: layer.weight, layer, weight)
-    if layer.bias is not None:
-        bias = jnp.zeros_like(layer.bias)
-        layer = eqx.tree_at(lambda layer: layer.bias, layer, bias)
-    return layer
-
-
 class MLP(eqx.Module):
     c_fc: eqx.nn.Linear
     c_proj: eqx.nn.Linear
     dropout: eqx.nn.Dropout
 
-    def __init__(self, n_embd, bias, dropout, c_proj_std, key):
+    def __init__(self, n_embd, bias, dropout, key):
         key1, key2 = jrandom.split(key)
-        self.c_fc = reinit_linear(eqx.nn.Linear(n_embd, 4 * n_embd, use_bias=bias, key=key1), key1)
-        self.c_proj = reinit_linear(eqx.nn.Linear(
-            4 * n_embd, n_embd, use_bias=bias, key=key2), key2, w_std=c_proj_std)
+        self.c_fc = eqx.nn.Linear(n_embd, 4 * n_embd, use_bias=bias, key=key1)
+        self.c_proj = eqx.nn.Linear(4 * n_embd, n_embd, use_bias=bias, key=key2)
         self.dropout = eqx.nn.Dropout(dropout)
 
     @jax.named_scope('mlp')
@@ -65,13 +55,12 @@ class CausalSelfAttention(eqx.Module):
     attn_dropout: eqx.nn.Dropout
     resid_dropout: eqx.nn.Dropout
 
-    def __init__(self, n_embd, n_head, bias, dropout, c_proj_std, key):
+    def __init__(self, n_embd, n_head, bias, dropout, key):
         key1, key2 = jrandom.split(key)
         assert n_embd % n_head == 0
         self.n_head, self.n_embd = n_head, n_embd
-        self.c_attn = reinit_linear(eqx.nn.Linear(n_embd, 3 * n_embd, use_bias=bias, key=key1), key1)
-        self.c_proj = reinit_linear(eqx.nn.Linear(
-            n_embd, n_embd, use_bias=bias, key=key2), key2, w_std=c_proj_std)
+        self.c_attn = eqx.nn.Linear(n_embd, 3 * n_embd, use_bias=bias, key=key1)
+        self.c_proj = eqx.nn.Linear(n_embd, n_embd, use_bias=bias, key=key2)
         self.attn_dropout = eqx.nn.Dropout(dropout)
         self.resid_dropout = eqx.nn.Dropout(dropout)
 
@@ -103,13 +92,11 @@ class Block(eqx.Module):
     ln1: eqx.nn.LayerNorm
     ln2: eqx.nn.LayerNorm
 
-    def __init__(self, n_embd, n_head, bias, dropout, c_proj_std, key):
+    def __init__(self, n_embd, n_head, bias, dropout, key):
         key1, key2 = jrandom.split(key)
         self.attn = CausalSelfAttention(
-            n_embd=n_embd, n_head=n_head, bias=bias, dropout=dropout, c_proj_std=c_proj_std,
-            key=key1)
-        self.mlp = MLP(
-            n_embd=n_embd, bias=bias, dropout=dropout, c_proj_std=c_proj_std, key=key2)
+            n_embd=n_embd, n_head=n_head, bias=bias, dropout=dropout, key=key1)
+        self.mlp = MLP(n_embd=n_embd, bias=bias, dropout=dropout, key=key2)
         self.ln1 = eqx.nn.LayerNorm(n_embd, eps=1e-5, use_bias=bias)
         self.ln2 = eqx.nn.LayerNorm(n_embd, eps=1e-5, use_bias=bias)
 
@@ -122,6 +109,37 @@ class Block(eqx.Module):
         x_TxD = x_TxD + self.attn(vmap(self.ln1)(x_TxD), inference=inference, key=attn_key)
         mlp = vmap(self.mlp, in_axes=(0, None, 0))
         return x_TxD + mlp(vmap(self.ln2)(x_TxD), inference, mlp_key)
+
+
+def reinit_linear(layer: eqx.nn.Linear, key: KeyArray, w_std: float) -> eqx.nn.Linear:
+    """Reinitializes linear weight to given std, bias to zero."""
+    weight = jrandom.normal(key, layer.weight.shape) * w_std
+    layer = eqx.tree_at(lambda layer: layer.weight, layer, weight)
+    if layer.bias is not None:
+        bias = jnp.zeros_like(layer.bias)
+        layer = eqx.tree_at(lambda layer: layer.bias, layer, bias)
+    return layer
+
+
+def init_block(block: Block, n_layer, key) -> Block:
+    """Follows GPT2."""
+    c_proj_std = 0.02 / math.sqrt(2 * n_layer)
+    def _init_mlp(mlp: MLP, _key) -> MLP:
+        fc_key, proj_key = jrandom.split(_key)
+        new_fc = reinit_linear(mlp.c_fc, fc_key, 0.02)
+        new_proj = reinit_linear(mlp.c_proj, proj_key, c_proj_std)
+        return eqx.tree_at(
+            lambda _: [mlp.fc, mlp.c_proj], mlp, lambda _: [new_fc, new_proj])
+    def _init_attn(attn: CausalSelfAttention, _key) -> CausalSelfAttention:
+        attn_key, proj_key = jrandom.split(_key)
+        new_attn = reinit_linear(attn.c_attn, attn_key, 0.02)
+        new_proj = reinit_linear(attn.c_proj, proj_key, c_proj_std)
+        return eqx.tree_at(
+            lambda _: [attn.c_attn, attn.c_proj], attn, lambda _: [new_attn, new_proj])
+    attn_key, mlp_key = jrandom.split(key)
+    new_mlp = _init_mlp(block.mlp, mlp_key)
+    new_attn = _init_attn(block.attn, attn_key)
+    return eqx.tree_at(lambda _: [block.mlp, block.attn], block, lambda _: [new_mlp, new_attn])
 
 
 @dataclass
@@ -148,13 +166,13 @@ class GPT(eqx.Module):
         self.n_layer = config.n_layer
         block_key, head_key, wpe_key = jrandom.split(key, 3)
         self.drop = eqx.nn.Dropout(config.dropout)
-        c_proj_std = 0.02 / math.sqrt(2 * config.n_layer)
         def make_block(_key):
-            return Block(config.n_embd, config.n_head, config.bias, config.dropout, c_proj_std, _key)
+            return Block(config.n_embd, config.n_head, config.bias, config.dropout, _key)
         self.blocks = eqx.filter_vmap(make_block)(jrandom.split(block_key, config.n_layer))
         self.ln_f = eqx.nn.LayerNorm(config.n_embd, eps=1e-5, use_bias=config.bias)
-        self.lm_head = reinit_linear(eqx.nn.Linear(
-            config.n_embd, config.vocab_size, use_bias=config.bias, key=head_key), head_key)
+        lm_head = eqx.nn.Linear(
+            config.n_embd, config.vocab_size, use_bias=config.bias, key=head_key)
+        self.lm_head = reinit_linear(lm_head, head_key, 0.02)
         self.wte = Embedding(config.vocab_size, config.n_embd, weight=self.lm_head.weight)
         wpe_wt = 0.02 * jrandom.normal(wpe_key, (config.block_size, config.n_embd))
         self.wpe = Embedding(config.block_size, config.n_embd, weight=wpe_wt)
