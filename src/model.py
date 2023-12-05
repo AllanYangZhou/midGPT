@@ -128,18 +128,16 @@ def init_block(block: Block, n_layer, key) -> Block:
         fc_key, proj_key = jrandom.split(_key)
         new_fc = reinit_linear(mlp.c_fc, fc_key, 0.02)
         new_proj = reinit_linear(mlp.c_proj, proj_key, c_proj_std)
-        return eqx.tree_at(
-            lambda _: [mlp.fc, mlp.c_proj], mlp, lambda _: [new_fc, new_proj])
+        return eqx.tree_at(lambda m: [m.c_fc, m.c_proj], mlp, [new_fc, new_proj])
     def _init_attn(attn: CausalSelfAttention, _key) -> CausalSelfAttention:
         attn_key, proj_key = jrandom.split(_key)
         new_attn = reinit_linear(attn.c_attn, attn_key, 0.02)
         new_proj = reinit_linear(attn.c_proj, proj_key, c_proj_std)
-        return eqx.tree_at(
-            lambda _: [attn.c_attn, attn.c_proj], attn, lambda _: [new_attn, new_proj])
+        return eqx.tree_at(lambda a: [a.c_attn, a.c_proj], attn, [new_attn, new_proj])
     attn_key, mlp_key = jrandom.split(key)
     new_mlp = _init_mlp(block.mlp, mlp_key)
     new_attn = _init_attn(block.attn, attn_key)
-    return eqx.tree_at(lambda _: [block.mlp, block.attn], block, lambda _: [new_mlp, new_attn])
+    return eqx.tree_at(lambda b: [b.mlp, b.attn], block, [new_mlp, new_attn])
 
 
 @dataclass
@@ -167,7 +165,9 @@ class GPT(eqx.Module):
         block_key, head_key, wpe_key = jrandom.split(key, 3)
         self.drop = eqx.nn.Dropout(config.dropout)
         def make_block(_key):
-            return Block(config.n_embd, config.n_head, config.bias, config.dropout, _key)
+            return init_block(Block(
+                config.n_embd, config.n_head, config.bias, config.dropout, _key),
+                self.n_layer, _key)
         self.blocks = eqx.filter_vmap(make_block)(jrandom.split(block_key, config.n_layer))
         self.ln_f = eqx.nn.LayerNorm(config.n_embd, eps=1e-5, use_bias=config.bias)
         lm_head = eqx.nn.Linear(
