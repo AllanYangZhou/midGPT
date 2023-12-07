@@ -55,7 +55,7 @@ def from_json(json_path, dataclass_type):
 
 
 def generate(model, idx, max_new_tokens, temperature=1.0, top_k=None, key=None):
-    block_size = model.wpe.weight.shape[0]
+    block_size = model.wpe.weight.shape[0]  # TODO: get this from config.
     # TODO: Move JIT outside this function?
     batched_model = eqx.filter_jit(jax.vmap(eqx.Partial(model, inference=True)))
     for _ in range(max_new_tokens):
@@ -134,7 +134,7 @@ mesh = Mesh(mesh_utils.create_device_mesh((len(devices),)), axis_names=("data",)
 data_sharding = NamedSharding(mesh, P(None, None))
 x = jax.device_put(x, data_sharding)
 jax.debug.visualize_array_sharding(x)
-jax.debug.visualize_array_sharding(model.lm_head.weight)
+jax.debug.visualize_array_sharding(model.lm_head.weight_MxN)
 
 print("generating samples...")
 model = jmp.get_policy(config.policy).cast_to_compute(model)
