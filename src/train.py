@@ -33,8 +33,8 @@ class ExperimentConfig:
     beta2: float
     weight_decay: float
     eval_interval: int
-    param_dtype: jnp.dtype
-    compute_dtype: jnp.dtype
+    param_dtype: str  # bfloat16 or float32
+    compute_dtype: str
     g_accum_iters: int  # Accumulate this many grads before step
     shard_model: bool
     model_config: GPTConfig
