@@ -1,3 +1,4 @@
+import jax.numpy as jnp
 from src.train import ExperimentConfig
 from src.model import GPTConfig
 
@@ -13,7 +14,8 @@ config = ExperimentConfig(
     beta2=0.95,
     weight_decay=1e-4,
     eval_interval=1000,
-    policy='params=bfloat16,compute=bfloat16,output=bfloat16',
+    compute_dtype=jnp.bfloat16,
+    param_dtype=jnp.bfloat16,
     g_accum_iters=4,
     shard_model=True,
     model_config=GPTConfig(

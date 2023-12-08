@@ -5,7 +5,6 @@ import os
 import equinox as eqx
 import jax
 from jax.experimental import mesh_utils
-import jmp
 import optax
 import orbax.checkpoint as ocp
 import numpy as np
@@ -34,11 +33,21 @@ class ExperimentConfig:
     beta2: float
     weight_decay: float
     eval_interval: int
-    policy: str  # JMP mixed precision policy string
+    param_dtype: jnp.dtype
+    compute_dtype: jnp.dtype
     g_accum_iters: int  # Accumulate this many grads before step
     shard_model: bool
     model_config: GPTConfig
     debug: bool = False
+
+
+def cast_pytree(pytree: tp.Any, dtype: jnp.dtype) -> tp.Any:
+    """Cast a pytree of arrays to a given dtype, ignore non-arrays."""
+    def cast(x):
+        if eqx.isarray(x):
+            return x.astype(dtype)
+        return x
+    return jtu.tree_map(cast, pytree)
 
 
 def get_batch(
@@ -57,7 +66,6 @@ def get_batch(
 def make_training_fns(
         config: ExperimentConfig, optimizer: optax.GradientTransformationExtraArgs,
         mesh: Mesh) -> tp.Tuple[tp.Callable, tp.Callable]:
-    policy = jmp.get_policy(config.policy)
     def loss_fn(model_params: GPT, model_static: GPT, x: Array, y: Array, key: tp.Optional[KeyArray]) -> Array:
         model = eqx.combine(model_params, model_static)
         if key is not None:
@@ -68,8 +76,8 @@ def make_training_fns(
     @partial(eqx.filter_jit, donate='all')
     def step(model: GPT, opt_state, x_GxBxT: Array, y_GxBxT: Array, key: KeyArray):
         G = config.g_accum_iters
-        params, static = eqx.partition(policy.cast_to_compute(model), eqx.is_array)
-        params_cpt = policy.cast_to_compute(params)
+        params, static = eqx.partition((model), eqx.is_array)
+        params_cpt = cast_pytree(params, config.compute_dtype)
         # compute loss and grad on microbatch, then scan over microbatches
         def microstep(grad_so_far, xykey_g: tp.Tuple[Array, Array, KeyArray]):
             loss, grad = jax.value_and_grad(loss_fn)(params_cpt, static, *xykey_g)
@@ -93,7 +101,7 @@ def make_training_fns(
 
     data_sharding = NamedSharding(mesh, P('data', None))  # (B, D)
     def evaluate(model: GPT, data: np.ndarray) -> Array:
-        model = eqx.Partial(policy.cast_to_compute(model), inference=True)
+        model = eqx.Partial(cast_pytree(model, config.compute_dtype), inference=True)
         tot_loss = jnp.zeros(())
         num_eval_steps = 1 if config.debug else 200
         for i in range(num_eval_steps):
@@ -135,6 +143,7 @@ def train(config: ExperimentConfig):
     key = jrandom.PRNGKey(0)
     def init_sharded_model(model_key):
         model = GPT(config.model_config, model_key)
+        model = cast_pytree(model, config.param_dtype)
         model = shard_gpt(model, mesh, config.shard_model)
         return model
     key, key1 = jrandom.split(key)
