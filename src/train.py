@@ -68,21 +68,21 @@ def make_training_fns(
     @partial(eqx.filter_jit, donate='all')
     def step(model: GPT, opt_state, x_GxBxT: Array, y_GxBxT: Array, key: KeyArray):
         G = config.g_accum_iters
-        # put params in compute dtype (probably bfloat16), and split params out
-        model_params, model_static = eqx.partition(policy.cast_to_compute(model), eqx.is_array)
+        params, static = eqx.partition(policy.cast_to_compute(model), eqx.is_array)
+        params_cpt = policy.cast_to_compute(params)
         # compute loss and grad on microbatch, then scan over microbatches
         def microstep(grad_so_far, xykey_g: tp.Tuple[Array, Array, KeyArray]):
-            loss, grad = jax.value_and_grad(loss_fn)(model_params, model_static, *xykey_g)
+            loss, grad = jax.value_and_grad(loss_fn)(params_cpt, static, *xykey_g)
             grad = shard_gpt(grad, mesh, config.shard_model)
             grad_so_far = jtu.tree_map(lambda x, y: x + y, grad, grad_so_far)
             return grad_so_far, loss
         all_keys = jrandom.split(key, config.g_accum_iters)
-        init_grad = jtu.tree_map(jnp.zeros_like, model_params)
+        init_grad = jtu.tree_map(jnp.zeros_like, params)
         grad, loss_G = scan(microstep, init_grad, (x_GxBxT, y_GxBxT, all_keys))
         # Grad accumulated (summed) over G, so divide.
         loss, grad = jnp.mean(loss_G, axis=0), jtu.tree_map(lambda x: x / G, grad)
-        updates, opt_state = optimizer.update(grad, opt_state, model)
-        model = eqx.apply_updates(model, updates)
+        updates, opt_state = optimizer.update(grad, opt_state, params)
+        model = eqx.combine(optax.apply_updates(params, updates), static)
         return model, opt_state, loss
 
     @eqx.filter_jit
