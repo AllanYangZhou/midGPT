@@ -123,7 +123,7 @@ def train(config: ExperimentConfig):
         max_to_keep=1, save_interval_steps=config.eval_interval)
     mngr = ocp.CheckpointManager(
         os.path.abspath(os.path.join(config.rundir, 'ckpt_mngr')),
-        ocp.PyTreeCheckpointer(),
+        ocp.AsyncCheckpointer(ocp.PyTreeCheckpointHandler()),
         options=options)
 
     scheduler = optax.warmup_cosine_decay_schedule(
@@ -183,3 +183,4 @@ def train(config: ExperimentConfig):
         pbar.set_postfix(**postfix_values)
     pbar.close()
     writer.close()
+    mngr.wait_until_finished()
