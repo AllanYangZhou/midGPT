@@ -16,10 +16,10 @@ class MLP(eqx.Module):
     c_proj: Linear
     dropout: eqx.nn.Dropout
 
-    def __init__(self, n_embd, bias, dropout, key):
+    def __init__(self, n_embd, dropout, key):
         key1, key2 = jrandom.split(key)
-        self.c_fc = Linear(n_embd, 4 * n_embd, use_bias=bias, key=key1)
-        self.c_proj = Linear(4 * n_embd, n_embd, use_bias=bias, key=key2)
+        self.c_fc = Linear(n_embd, 4 * n_embd, key=key1)
+        self.c_proj = Linear(4 * n_embd, n_embd, key=key2)
         self.dropout = eqx.nn.Dropout(dropout)
 
     @jax.named_scope('mlp')
@@ -38,16 +38,16 @@ class CausalSelfAttention(eqx.Module):
     q_ln: eqx.nn.LayerNorm
     k_ln: eqx.nn.LayerNorm
 
-    def __init__(self, n_embd, n_head, bias, dropout, key):
+    def __init__(self, n_embd, n_head, dropout, key):
         key1, key2 = jrandom.split(key)
         assert n_embd % n_head == 0
         self.n_head, self.n_embd = n_head, n_embd
-        self.c_attn = Linear(n_embd, 3 * n_embd, use_bias=bias, key=key1)
-        self.c_proj = Linear(n_embd, n_embd, use_bias=bias, key=key2)
+        self.c_attn = Linear(n_embd, 3 * n_embd, key=key1)
+        self.c_proj = Linear(n_embd, n_embd, key=key2)
         self.attn_dropout = eqx.nn.Dropout(dropout)
         self.resid_dropout = eqx.nn.Dropout(dropout)
-        self.q_ln = eqx.nn.LayerNorm(n_embd // n_head, eps=1e-6, use_weight=True, use_bias=bias)
-        self.k_ln = eqx.nn.LayerNorm(n_embd // n_head, eps=1e-6, use_weight=True, use_bias=bias)
+        self.q_ln = eqx.nn.LayerNorm(n_embd // n_head, eps=1e-6, use_weight=True, use_bias=False)
+        self.k_ln = eqx.nn.LayerNorm(n_embd // n_head, eps=1e-6, use_weight=True, use_bias=False)
 
     @jax.named_scope('causal_sa')
     def __call__(self, x_TxD, inference=False, key=None):
@@ -84,11 +84,10 @@ class Block(eqx.Module):
     ln1: RMSNorm
     ln2: RMSNorm
 
-    def __init__(self, n_embd, n_head, bias, dropout, key):
+    def __init__(self, n_embd, n_head, dropout, key):
         key1, key2 = jrandom.split(key)
-        self.attn = CausalSelfAttention(
-            n_embd=n_embd, n_head=n_head, bias=bias, dropout=dropout, key=key1)
-        self.mlp = MLP(n_embd=n_embd, bias=bias, dropout=dropout, key=key2)
+        self.attn = CausalSelfAttention(n_embd=n_embd, n_head=n_head, dropout=dropout, key=key1)
+        self.mlp = MLP(n_embd=n_embd, dropout=dropout, key=key2)
         self.ln1 = RMSNorm(n_embd)
         self.ln2 = RMSNorm(n_embd)
 
@@ -111,7 +110,6 @@ class GPTConfig:
     n_head: int  # No. attention heads
     n_embd: int  # Hidden dimension
     dropout: float
-    bias: bool  # Whether or not to use biases in linear layers
 
 
 class GPT(eqx.Module):
@@ -127,14 +125,14 @@ class GPT(eqx.Module):
         block_key, head_key = jrandom.split(key)
         self.drop = eqx.nn.Dropout(config.dropout)
         def make_block(_key):
-            return Block(config.n_embd, config.n_head, config.bias, config.dropout, _key)
+            return Block(config.n_embd, config.n_head, config.dropout, _key)
         self.blocks = eqx.filter_vmap(make_block)(jrandom.split(block_key, config.n_layer))
         self.ln_f = RMSNorm(config.n_embd, eps=1e-5)
         embed_std = (1 / math.sqrt(config.n_embd))
         wte_wt =  embed_std * jrandom.normal(head_key, (config.vocab_size, config.n_embd))
         self.wte = Embedding(config.vocab_size, config.n_embd, weight=wte_wt)
         # Share first and last layer parameters.
-        self.lm_head = Linear(config.n_embd, config.vocab_size, use_bias=config.bias, weight=wte_wt)
+        self.lm_head = Linear(config.n_embd, config.vocab_size, weight=wte_wt)
 
     @jax.named_scope('gpt')
     def __call__(self, x_T, inference=False, key=None):

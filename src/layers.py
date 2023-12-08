@@ -32,32 +32,27 @@ class Embedding(eqx.Module):
 class Linear(eqx.Module):
     """Linear with trunc normal init."""
     weight_MxN: Array
-    bias_M: tp.Optional[Array]
 
     def __init__(
-        self, in_features: int, out_features: int, use_bias: bool=True,
-        weight: tp.Optional[Array]=None, *, key: tp.Optional[KeyArray]=None
+        self, in_features: int, out_features: int, weight: tp.Optional[Array]=None, 
+        *, key: tp.Optional[KeyArray]=None
     ):
         super().__init__()
         self.weight_MxN = weight
         if self.weight_MxN is None:
             self.weight_MxN = (1 / math.sqrt(in_features)) * jrandom.truncated_normal(
                 key, lower=-2, upper=2, shape=(out_features, in_features))
-        self.bias_M = None
-        if use_bias:
-            self.bias_M = jnp.zeros((out_features,))
 
     @jax.named_scope("Linear")
     def __call__(self, x_N: Array, *, key: KeyArray=None) -> Array:
         x_M = self.weight_MxN @ x_N
-        if self.bias_M is not None:
-            x_M = x_M + self.bias_M
         return x_M
 
 
 class RMSNorm(eqx.Module):
     weight_M: tp.Optional[Array]
     eps: float
+
     def __init__(self, dim: int, use_weight=False, eps=1e-6):
         super().__init__()
         self.eps, self.weight_M = eps, None

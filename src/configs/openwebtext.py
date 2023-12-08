@@ -19,7 +19,5 @@ config = ExperimentConfig(
     g_accum_iters=4,
     shard_model=True,
     model_config=GPTConfig(
-        block_size=1024, vocab_size=50304, n_layer=12, n_head=12,
-        n_embd=768, dropout=0.0, bias=False,
-    )
+        block_size=1024, vocab_size=50304, n_layer=12, n_head=12, n_embd=768, dropout=0.0)
 )
