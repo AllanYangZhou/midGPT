@@ -3,7 +3,7 @@ import math
 import typing as tp
 import equinox as eqx
 import jax
-from .layers import Linear, Embedding, fixed_pos_embedding, apply_rotary_pos_emb
+from .layers import Linear, Embedding, RMSNorm, fixed_pos_embedding, apply_rotary_pos_emb
 
 jnp, jrandom, vmap, Array, jtu = jax.numpy, jax.random, jax.vmap, jax.Array, jax.tree_util
 KeyArray = tp.Any
@@ -73,16 +73,16 @@ class CausalSelfAttention(eqx.Module):
 class Block(eqx.Module):
     attn: CausalSelfAttention
     mlp: MLP
-    ln1: eqx.nn.LayerNorm
-    ln2: eqx.nn.LayerNorm
+    ln1: RMSNorm
+    ln2: RMSNorm
 
     def __init__(self, n_embd, n_head, bias, dropout, key):
         key1, key2 = jrandom.split(key)
         self.attn = CausalSelfAttention(
             n_embd=n_embd, n_head=n_head, bias=bias, dropout=dropout, key=key1)
         self.mlp = MLP(n_embd=n_embd, bias=bias, dropout=dropout, key=key2)
-        self.ln1 = eqx.nn.LayerNorm(n_embd, eps=1e-5, use_bias=bias)
-        self.ln2 = eqx.nn.LayerNorm(n_embd, eps=1e-5, use_bias=bias)
+        self.ln1 = RMSNorm(n_embd)
+        self.ln2 = RMSNorm(n_embd)
 
     @jax.named_scope('block')
     def __call__(self, x_TxD, inference=False, key=None):
@@ -110,7 +110,7 @@ class GPT(eqx.Module):
     wte: Embedding
     drop: eqx.nn.Dropout
     blocks: tp.List[Block]
-    ln_f: eqx.nn.LayerNorm
+    ln_f: RMSNorm
     lm_head: Linear
     n_layer: int
 
@@ -121,7 +121,7 @@ class GPT(eqx.Module):
         def make_block(_key):
             return Block(config.n_embd, config.n_head, config.bias, config.dropout, _key)
         self.blocks = eqx.filter_vmap(make_block)(jrandom.split(block_key, config.n_layer))
-        self.ln_f = eqx.nn.LayerNorm(config.n_embd, eps=1e-5, use_bias=config.bias)
+        self.ln_f = RMSNorm(config.n_embd, eps=1e-5)
         embed_std = (1 / math.sqrt(config.n_embd))
         wte_wt =  embed_std * jrandom.normal(head_key, (config.vocab_size, config.n_embd))
         self.wte = Embedding(config.vocab_size, config.n_embd, weight=wte_wt)

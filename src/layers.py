@@ -55,6 +55,23 @@ class Linear(eqx.Module):
         return x_M
 
 
+class RMSNorm(eqx.Module):
+    weight_M: tp.Optional[Array]
+    eps: float
+    def __init__(self, dim: int, use_weight=False, eps=1e-6):
+        super().__init__()
+        self.eps, self.weight_M = eps, None
+        if use_weight:
+            self.weight_M = jnp.ones((dim,))
+
+    @jax.named_scope("RMSNorm")
+    def __call__(self, x_M: Array) -> Array:
+        out_M = x_M * jax.lax.rsqrt(jnp.mean(jnp.square(x_M), keepdims=True) + self.eps)
+        if self.weight_M is not None:
+            out_M = out_M * self.weight_M
+        return out_M
+
+
 ## RoPE functions
 def fixed_pos_embedding(C: int, T: int) -> tp.Tuple[np.ndarray, np.ndarray]:
     inv_freq_D = 1.0 / (10000 ** (np.arange(0, C, 2) / C))  # D = C // 2
@@ -72,6 +89,8 @@ def rotate_every_two(x: Array) -> Array:  # [a b c d] -> [-b a -d c]
 def apply_rotary_pos_emb(x_HxTxC: Array, sin_TxD: np.ndarray, cos_TxD: np.ndarray) -> Array:
     sin_TxD = jnp.asarray(sin_TxD, dtype=x_HxTxC.dtype)
     cos_TxD = jnp.asarray(cos_TxD, dtype=x_HxTxC.dtype)
-    sin_1xTxC = jnp.concatenate((sin_TxD, sin_TxD), axis=-1)[None]  # C = 2D
-    cos_1xTxC = jnp.concatenate((cos_TxD, cos_TxD), axis=-1)[None]
+    sin_1xTxC = jnp.stack((sin_TxD, sin_TxD), axis=-1)
+    sin_1xTxC = jnp.reshape(sin_1xTxC, sin_1xTxC.shape[:-2] + (-1,))
+    cos_1xTxC = jnp.stack((cos_TxD, cos_TxD), axis=-1)
+    cos_1xTxC = jnp.reshape(cos_1xTxC, cos_1xTxC.shape[:-2] + (-1,))
     return (x_HxTxC * cos_1xTxC) + (rotate_every_two(x_HxTxC) * sin_1xTxC)
