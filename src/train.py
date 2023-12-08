@@ -76,7 +76,7 @@ def make_training_fns(
         # compute loss and grad on microbatch, then scan over microbatches
         def microstep(grad_so_far, xykey_g: tp.Tuple[Array, Array, KeyArray]):
             loss, grad = jax.value_and_grad(loss_fn)(model_params, model_static, *xykey_g)
-            if config.shard_model: grad = shard_gpt(grad, mesh)
+            grad = shard_gpt(grad, mesh, config.shard_model)
             grad_so_far = jtu.tree_map(lambda x, y: x + y, grad, grad_so_far)
             return grad_so_far, loss
         all_keys = jrandom.split(key, config.g_accum_iters)
@@ -141,16 +141,26 @@ def train(config: ExperimentConfig):
     key = jrandom.PRNGKey(0)
     def init_sharded_model(model_key):
         model = GPT(config.model_config, model_key)
-        if config.shard_model: model = shard_gpt(model, mesh)
+        model = shard_gpt(model, mesh, config.shard_model)
         return model
     key, key1 = jrandom.split(key)
     # Use jit with sharding constraints to init sharded model.
     model = eqx.filter_jit(init_sharded_model)(key1)
     print(f'Model has {count_params(model)} parameters.')
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
+    def shard_opt_arr(x: Array):
+        if len(x.sharding.addressable_devices) < jax.device_count():
+            assert x.ndim == 0  # Replicate scalar optimization states.
+            return jax.device_put(x, NamedSharding(mesh, P()))
+        return x
+    opt_state = jtu.tree_map(shard_opt_arr, opt_state)
     first_step = 0
     if mngr.latest_step() is not None:  # Restore existing checkpoint.
-        model_leaves, opt_state_leaves = mngr.restore(mngr.latest_step())
+        ex_state = (jtu.tree_leaves(model), jtu.tree_leaves(opt_state))
+        ex_shardings = jtu.tree_map(lambda x: x.sharding if eqx.is_array(x) else None, ex_state)
+        restore_args = ocp.checkpoint_utils.construct_restore_args(ex_state, ex_shardings)
+        model_leaves, opt_state_leaves = mngr.restore(
+            mngr.latest_step(), restore_kwargs={'restore_args': restore_args})
         model = jtu.tree_unflatten(jtu.tree_structure(model), model_leaves)
         opt_state = jtu.tree_unflatten(jtu.tree_structure(opt_state), opt_state_leaves)
         first_step = mngr.latest_step() + 1

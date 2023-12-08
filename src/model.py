@@ -163,10 +163,14 @@ def count_params(model: GPT) -> int:
     return tot - dupe  # non-embedding only.
 
 
-def shard_gpt(model: GPT, mesh: Mesh, sharding_fn=with_sharding_constraint) -> eqx.Module:
+def shard_gpt(
+        model: GPT, mesh: Mesh, shard_model: bool, sharding_fn=with_sharding_constraint
+) -> eqx.Module:
     """Shard model parameters over devices (TPUs or GPUs)."""
     def sharding_map(x: Array) -> NamedSharding:
-        axes = (None,) * (x.ndim - 1) + ('data',)
+        axes = (None,) * x.ndim
+        if shard_model:
+            axes = (None,) * (x.ndim - 1) + ('data',)
         return NamedSharding(mesh, P(*axes))
     dynamic_model, static_model = eqx.partition(model, eqx.is_array)
     dynamic_model = jtu.tree_map(lambda x: sharding_fn(x, sharding_map(x)), dynamic_model)
