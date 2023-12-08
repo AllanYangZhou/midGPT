@@ -4,17 +4,16 @@ from src.model import GPTConfig
 config = ExperimentConfig(
     rundir='',
     data_dir='data/openwebtext',
-    learning_rate=6e-4,
-    # Ideal effective batch size: 480
+    learning_rate=1e-3,
     batch_size=128,
-    warmup_steps=2000,
-    min_lr=6e-5,
-    lr_decay_steps=600_000,
+    warmup_steps=5000,
+    min_lr=1e-5,
+    lr_decay_steps=480_000,
     max_steps=480_000,
     beta2=0.95,
-    weight_decay=0.1,
+    weight_decay=1e-4,
     eval_interval=1000,
-    policy='params=float32,compute=bfloat16,output=bfloat16',
+    policy='params=bfloat16,compute=bfloat16,output=bfloat16',
     g_accum_iters=4,
     shard_model=True,
     model_config=GPTConfig(

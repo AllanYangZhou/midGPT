@@ -132,8 +132,8 @@ def train(config: ExperimentConfig):
     optimizer = optax.chain(
         optax.clip_by_global_norm(1.0),
         optax.scale_by_adam(b2=config.beta2),
-        optax.add_decayed_weights(config.weight_decay),
         optax.scale_by_schedule(scheduler),
+        optax.add_decayed_weights(config.weight_decay),
         optax.scale(-1),
     )
     step, evaluate = make_training_fns(config, optimizer, mesh)
