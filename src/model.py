@@ -35,6 +35,8 @@ class CausalSelfAttention(eqx.Module):
     c_proj: Linear
     attn_dropout: eqx.nn.Dropout
     resid_dropout: eqx.nn.Dropout
+    q_ln: eqx.nn.LayerNorm
+    k_ln: eqx.nn.LayerNorm
 
     def __init__(self, n_embd, n_head, bias, dropout, key):
         key1, key2 = jrandom.split(key)
@@ -44,6 +46,8 @@ class CausalSelfAttention(eqx.Module):
         self.c_proj = Linear(n_embd, n_embd, use_bias=bias, key=key2)
         self.attn_dropout = eqx.nn.Dropout(dropout)
         self.resid_dropout = eqx.nn.Dropout(dropout)
+        self.q_ln = eqx.nn.LayerNorm(n_embd // n_head, eps=1e-6, use_weight=True, use_bias=bias)
+        self.k_ln = eqx.nn.LayerNorm(n_embd // n_head, eps=1e-6, use_weight=True, use_bias=bias)
 
     @jax.named_scope('causal_sa')
     def __call__(self, x_TxD, inference=False, key=None):
@@ -51,9 +55,13 @@ class CausalSelfAttention(eqx.Module):
         T, D = x_TxD.shape
         Q_TxD, K_TxD, V_TxD = jnp.split(vmap(self.c_attn)(x_TxD), 3, axis=-1)
         C = self.n_embd // self.n_head
-        sin_TxCp, cos_TxCp = fixed_pos_embedding(C, T)  # Cp = C//2
         Q_HxTxC = jnp.transpose(jnp.reshape(Q_TxD, (T, self.n_head, C)), (1, 0, 2))
         K_HxTxC = jnp.transpose(jnp.reshape(K_TxD, (T, self.n_head, C)), (1, 0, 2))
+        # QK LayerNorm
+        Q_HxTxC = vmap(vmap(self.q_ln))(Q_HxTxC)
+        K_HxTxC = vmap(vmap(self.k_ln))(K_HxTxC)
+        # Rotary embeddings
+        sin_TxCp, cos_TxCp = fixed_pos_embedding(C, T)  # Cp = C//2
         Q_HxTxC = apply_rotary_pos_emb(Q_HxTxC, sin_TxCp, cos_TxCp)
         K_HxTxC = apply_rotary_pos_emb(K_HxTxC, sin_TxCp, cos_TxCp)
         V_HxTxC = jnp.transpose(jnp.reshape(V_TxD, (T, self.n_head, C)), (1, 0, 2))

@@ -177,7 +177,7 @@ def train(config: ExperimentConfig):
             loss.block_until_ready(); jax.profiler.stop_trace()
         if not config.debug: mngr.save(itr, (jtu.tree_leaves(model), jtu.tree_leaves(opt_state)))
         postfix_values['loss'] = loss.item()
-        postfix_values['lr'] = scheduler(opt_state[3].count).item()
+        postfix_values['lr'] = scheduler(opt_state[2].count).item()
         if pbar.format_dict['rate'] is not None:
             postfix_values['thpt'] = pbar.format_dict['rate'] * config.batch_size * config.g_accum_iters
         pbar.set_postfix(**postfix_values)

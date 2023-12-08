@@ -11,7 +11,7 @@ config = ExperimentConfig(
     lr_decay_steps=5000,
     max_steps=5000,
     beta2=0.99,
-    weight_decay=0.1,
+    weight_decay=1e-4,
     eval_interval=2000,
     policy='params=float32,compute=bfloat16,output=bfloat16',
     g_accum_iters=1,
