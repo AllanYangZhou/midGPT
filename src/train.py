@@ -62,11 +62,8 @@ def make_training_fns(
         model = eqx.combine(model_params, model_static)
         if key is not None:
             key = jrandom.split(key, x.shape[0])
-        logits = vmap(model)(x, key=key)
-        orig_dtype = logits.dtype
-        loss = optax.softmax_cross_entropy_with_integer_labels(
-            logits.astype(jnp.float32), y)  # compute loss in float32
-        return loss.mean().astype(orig_dtype)
+        logits = vmap(model)(x, key=key).astype(jnp.float32)
+        return optax.softmax_cross_entropy_with_integer_labels(logits, y).mean()
 
     @partial(eqx.filter_jit, donate='all')
     def step(model: GPT, opt_state, x_GxBxT: Array, y_GxBxT: Array, key: KeyArray):
@@ -84,8 +81,6 @@ def make_training_fns(
         grad, loss_G = scan(microstep, init_grad, (x_GxBxT, y_GxBxT, all_keys))
         # Grad accumulated (summed) over G, so divide.
         loss, grad = jnp.mean(loss_G, axis=0), jtu.tree_map(lambda x: x / G, grad)
-        # put grad back in params dtype
-        grad = policy.cast_to_param(grad)
         updates, opt_state = optimizer.update(grad, opt_state, model)
         model = eqx.apply_updates(model, updates)
         return model, opt_state, loss
@@ -98,8 +93,7 @@ def make_training_fns(
 
     data_sharding = NamedSharding(mesh, P('data', None))  # (B, D)
     def evaluate(model: GPT, data: np.ndarray) -> Array:
-        model = policy.cast_to_compute(model)
-        model = eqx.Partial(model, inference=True)
+        model = eqx.Partial(policy.cast_to_compute(model), inference=True)
         tot_loss = jnp.zeros(())
         num_eval_steps = 1 if config.debug else 200
         for i in range(num_eval_steps):
@@ -177,8 +171,7 @@ def train(config: ExperimentConfig):
             writer.add_scalar('loss/val', val_loss, itr)
         key, key1 = jrandom.split(key)
         x_GxBxD, y_GxBxD = get_batch(
-            train_data, config.model_config.block_size, config.batch_size, config.g_accum_iters
-        )
+            train_data, config.model_config.block_size, config.batch_size, config.g_accum_iters)
         if config.debug and itr == 0:
             jax.profiler.start_trace(os.path.join(config.rundir, 'logs'))
         x_GxBxD, y_GxBxD = jax.device_put((x_GxBxD, y_GxBxD), data_sharding)
