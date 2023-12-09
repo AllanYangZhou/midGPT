@@ -12,9 +12,11 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--config', type=str, required=True)
 parser.add_argument('--rundir', type=str)
 parser.add_argument('--debug', action='store_true')
+parser.add_argument('--multihost', action='store_true')
 cmd_args = parser.parse_args()
 
-jax.distributed.initialize()
+if cmd_args.multihost:
+    jax.distributed.initialize()
 # load config from src.configs
 config = getattr(__import__(
     'src.configs', fromlist=[cmd_args.config]), cmd_args.config).config

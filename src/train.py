@@ -158,8 +158,8 @@ def train(config: ExperimentConfig):
         0, config.learning_rate, config.warmup_steps, config.lr_decay_steps,
         end_value=config.min_lr)
     @jax.jit
-    def get_lr(_optimizer):
-        return scheduler(_optimizer[2].count)
+    def get_lr(_opt_state):
+        return scheduler(_opt_state[2].count)
     optimizer = optax.chain(
         optax.clip_by_global_norm(1.0),
         optax.scale_by_adam(b2=config.beta2),
@@ -221,7 +221,7 @@ def train(config: ExperimentConfig):
         if not config.debug:
             mngr.save(itr, (jtu.tree_leaves(model), jtu.tree_leaves(opt_state)))
         postfix_values['loss'] = loss.item()
-        postfix_values['lr'] = get_lr(optimizer).item()
+        postfix_values['lr'] = get_lr(opt_state).item()
         if pbar.format_dict['rate'] is not None:
             postfix_values['thpt'] = pbar.format_dict['rate'] * config.batch_size * config.g_accum_iters
         pbar.set_postfix(**postfix_values)
