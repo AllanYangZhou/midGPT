@@ -170,21 +170,21 @@ def train(config: ExperimentConfig):
     step, evaluate = make_training_fns(config, optimizer, mesh)
 
     key = jrandom.PRNGKey(0)
-    def init_trainstate(model_key):
+    def init_model(model_key):
         model = GPT(config.model_config, model_key)
         model = cast_pytree(model, config.param_dtype)
         model = shard_gpt(model, mesh, config.shard_model)
-        def repl_opt_scalars(x: Array):
-            if x.ndim == 0:
-                x = with_sharding_constraint(x, NamedSharding(mesh, P()))
-            return x
-        opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
-        opt_state = jtu.tree_map(repl_opt_scalars, opt_state)
-        return model, opt_state
+        return model
     key, key1 = jrandom.split(key)
     # Use jit with sharding constraints to init sharded model+opt.
-    model, opt_state = eqx.filter_jit(init_trainstate)(key1)
+    model= eqx.filter_jit(init_model)(key1)
     print(f'Model has {count_params(model)} parameters.')
+    def repl_opt_scalars(x: Array):
+        if x.ndim == 0:
+            x = reshard(x, NamedSharding(mesh, P()))
+        return x
+    opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
+    opt_state = jtu.tree_map(repl_opt_scalars, opt_state)
     first_step = 0
     if not config.debug and mngr.latest_step() is not None:  # Restore existing checkpoint.
         ex_state = (jtu.tree_leaves(model), jtu.tree_leaves(opt_state))
