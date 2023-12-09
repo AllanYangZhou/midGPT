@@ -44,7 +44,7 @@ class ExperimentConfig:
 def cast_pytree(pytree: tp.Any, dtype: jnp.dtype) -> tp.Any:
     """Cast a pytree of arrays to a given dtype, ignore non-arrays."""
     def cast(x):
-        if eqx.isarray(x):
+        if eqx.is_array(x):
             return x.astype(dtype)
         return x
     return jtu.tree_map(cast, pytree)
@@ -61,6 +61,30 @@ def get_batch(
         x = x.reshape(g_accum_iters, batch_size, block_size)
         y = y.reshape(g_accum_iters, batch_size, block_size)
     return x, y
+
+
+def tree_broadcast(prefix, target):
+  def _broadcast(leaf, subtree):
+    return jtu.tree_map(lambda _: leaf, subtree)
+  return jtu.tree_map(_broadcast, prefix, target)
+
+
+def reshard(tree, shardings):
+  def _make_global_arr(x, shard, shape):
+    # Avoid unnecessary copies and transfers:
+    if hasattr(x, "sharding") and x.sharding.is_equivalent_to(shard, len(shape)):  # pylint: disable=line-too-long
+      return x
+    if not getattr(x, "is_fully_addressable", True):
+      raise RuntimeError("Trying to reshard a non-fully-addressable array. "
+                         "Please see the doc-comment for detailed explanation.")
+    x = jax.device_get(x)  # Might be on local devices.
+    xs = [jax.device_put(x[s], device=d)
+          for d, s in shard.addressable_devices_indices_map(shape).items()]
+    return jax.make_array_from_single_device_arrays(shape, shard, xs)
+
+  shapes = jax.tree_map(np.shape, tree)
+  shardings = tree_broadcast(shardings, tree)
+  return jax.tree_map(_make_global_arr, tree, shardings, shapes)
 
 
 def make_training_fns(
@@ -102,12 +126,14 @@ def make_training_fns(
     data_sharding = NamedSharding(mesh, P('data', None))  # (B, D)
     def evaluate(model: GPT, data: np.ndarray) -> Array:
         model = eqx.Partial(cast_pytree(model, config.compute_dtype), inference=True)
-        tot_loss = jnp.zeros(())
+        tot_loss = reshard(jnp.zeros(()), NamedSharding(mesh, P()))
         num_eval_steps = 1 if config.debug else 200
         for i in range(num_eval_steps):
             x_BxD, y_BxD = get_batch(data, config.model_config.block_size, config.batch_size)
-            x_BxD, y_BxD = jax.device_put((x_BxD, y_BxD), data_sharding)
+            x_BxD, y_BxD = reshard((x_BxD, y_BxD), data_sharding)
             loss = simple_loss(model, x_BxD, y_BxD, None)
+            jax.debug.inspect_array_sharding(loss, callback=print)
+            jax.debug.inspect_array_sharding(tot_loss, callback=print)
             tot_loss = tot_loss + loss
         return tot_loss / num_eval_steps
 
@@ -115,11 +141,12 @@ def make_training_fns(
 
 
 def train(config: ExperimentConfig):
+    jax.distributed.initialize()
     writer = SummaryWriter(os.path.join(config.rundir, 'logs'), flush_secs=30)
     mesh = Mesh(mesh_utils.create_device_mesh((jax.device_count(),)), axis_names=('data',))
 
-    train_data = np.memmap(os.path.join(config.data_dir, 'train.bin'), dtype=np.uint16, mode='r')
-    val_data = np.memmap(os.path.join(config.data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+    train_data = np.memmap(os.path.join(config.data_dir, 'train.bin'), dtype=np.uint16, mode='r').copy()
+    val_data = np.memmap(os.path.join(config.data_dir, 'val.bin'), dtype=np.uint16, mode='r').copy()
 
     options = ocp.CheckpointManagerOptions(
         max_to_keep=1, save_interval_steps=config.eval_interval)
@@ -152,9 +179,8 @@ def train(config: ExperimentConfig):
     print(f'Model has {count_params(model)} parameters.')
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
     def shard_opt_arr(x: Array):
-        if len(x.sharding.addressable_devices) < jax.device_count():
-            assert x.ndim == 0  # Replicate scalar optimization states.
-            return jax.device_put(x, NamedSharding(mesh, P()))
+        if x.ndim == 0:
+            return reshard(x, NamedSharding(mesh, P()))
         return x
     opt_state = jtu.tree_map(shard_opt_arr, opt_state)
     first_step = 0
@@ -183,7 +209,7 @@ def train(config: ExperimentConfig):
             train_data, config.model_config.block_size, config.batch_size, config.g_accum_iters)
         if config.debug and itr == 0:
             jax.profiler.start_trace(os.path.join(config.rundir, 'logs'))
-        x_GxBxD, y_GxBxD = jax.device_put((x_GxBxD, y_GxBxD), data_sharding)
+        x_GxBxD, y_GxBxD = reshard((x_GxBxD, y_GxBxD), data_sharding)
         model, opt_state, loss = step(model, opt_state, x_GxBxD, y_GxBxD, key1)
         if config.debug and itr == 0:
             loss.block_until_ready(); jax.profiler.stop_trace()
