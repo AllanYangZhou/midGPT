@@ -3,6 +3,7 @@ from dataclasses import asdict
 import json
 import os
 from datetime import datetime
+import jax
 import equinox as eqx
 from src.train import train
 
@@ -13,6 +14,7 @@ parser.add_argument('--rundir', type=str)
 parser.add_argument('--debug', action='store_true')
 cmd_args = parser.parse_args()
 
+jax.distributed.initialize()
 # load config from src.configs
 config = getattr(__import__(
     'src.configs', fromlist=[cmd_args.config]), cmd_args.config).config

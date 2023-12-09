@@ -17,7 +17,7 @@ config = ExperimentConfig(
     compute_dtype='bfloat16',
     param_dtype='bfloat16',
     g_accum_iters=1,
-    shard_model=True,
+    shard_model=False,
     model_config=GPTConfig(
-        block_size=1024, vocab_size=50304, n_layer=12, n_head=12, n_embd=1536, dropout=0.0)
+        block_size=1024, vocab_size=50304, n_layer=12, n_head=12, n_embd=768, dropout=0.0)
 )

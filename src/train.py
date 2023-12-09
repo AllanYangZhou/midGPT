@@ -126,14 +126,12 @@ def make_training_fns(
     data_sharding = NamedSharding(mesh, P('data', None))  # (B, D)
     def evaluate(model: GPT, data: np.ndarray) -> Array:
         model = eqx.Partial(cast_pytree(model, config.compute_dtype), inference=True)
-        tot_loss = reshard(jnp.zeros(()), NamedSharding(mesh, P()))
+        tot_loss = 0
         num_eval_steps = 1 if config.debug else 200
         for i in range(num_eval_steps):
             x_BxD, y_BxD = get_batch(data, config.model_config.block_size, config.batch_size)
             x_BxD, y_BxD = reshard((x_BxD, y_BxD), data_sharding)
-            loss = simple_loss(model, x_BxD, y_BxD, None)
-            jax.debug.inspect_array_sharding(loss, callback=print)
-            jax.debug.inspect_array_sharding(tot_loss, callback=print)
+            loss = simple_loss(model, x_BxD, y_BxD, None).item()
             tot_loss = tot_loss + loss
         return tot_loss / num_eval_steps
 
@@ -141,19 +139,20 @@ def make_training_fns(
 
 
 def train(config: ExperimentConfig):
-    jax.distributed.initialize()
-    writer = SummaryWriter(os.path.join(config.rundir, 'logs'), flush_secs=30)
     mesh = Mesh(mesh_utils.create_device_mesh((jax.device_count(),)), axis_names=('data',))
 
     train_data = np.memmap(os.path.join(config.data_dir, 'train.bin'), dtype=np.uint16, mode='r').copy()
     val_data = np.memmap(os.path.join(config.data_dir, 'val.bin'), dtype=np.uint16, mode='r').copy()
 
-    options = ocp.CheckpointManagerOptions(
-        max_to_keep=1, save_interval_steps=config.eval_interval)
-    mngr = ocp.CheckpointManager(
-        os.path.abspath(os.path.join(config.rundir, 'ckpt_mngr')),
-        ocp.AsyncCheckpointer(ocp.PyTreeCheckpointHandler()),
-        options=options)
+    if jax.process_index() == 0:
+        writer = SummaryWriter(os.path.join(config.rundir, 'logs'), flush_secs=30)
+    if not config.debug:
+        options = ocp.CheckpointManagerOptions(
+            max_to_keep=1, save_interval_steps=config.eval_interval)
+        mngr = ocp.CheckpointManager(
+            os.path.abspath(os.path.join(config.rundir, 'ckpt_mngr')),
+            ocp.AsyncCheckpointer(ocp.PyTreeCheckpointHandler()),
+            options=options)
 
     scheduler = optax.warmup_cosine_decay_schedule(
         0, config.learning_rate, config.warmup_steps, config.lr_decay_steps,
@@ -184,7 +183,7 @@ def train(config: ExperimentConfig):
         return x
     opt_state = jtu.tree_map(shard_opt_arr, opt_state)
     first_step = 0
-    if mngr.latest_step() is not None:  # Restore existing checkpoint.
+    if not config.debug and mngr.latest_step() is not None:  # Restore existing checkpoint.
         ex_state = (jtu.tree_leaves(model), jtu.tree_leaves(opt_state))
         ex_shardings = jtu.tree_map(lambda x: x.sharding if eqx.is_array(x) else None, ex_state)
         restore_args = ocp.checkpoint_utils.construct_restore_args(ex_state, ex_shardings)
@@ -195,15 +194,18 @@ def train(config: ExperimentConfig):
         first_step = mngr.latest_step() + 1
     data_sharding = NamedSharding(mesh, P(None, 'data', None))  # (G, B, D)
     postfix_values = {}  # values to display in the progress bar
-    pbar = trange(first_step, config.max_steps, initial=first_step, total=config.max_steps)
+    pbar = trange(
+        first_step, config.max_steps, initial=first_step, total=config.max_steps,
+        disable=jax.process_index() != 0)
     for itr in pbar:
         if itr % config.eval_interval == 0:
-            train_loss = evaluate(model, train_data).item()
-            val_loss = evaluate(model, val_data).item()
+            train_loss = evaluate(model, train_data)
+            val_loss = evaluate(model, val_data)
             postfix_values['train_loss'] = train_loss
             postfix_values['val_loss'] = val_loss
-            writer.add_scalar('loss/train', train_loss, itr)
-            writer.add_scalar('loss/val', val_loss, itr)
+            if jax.process_index() == 0:
+                writer.add_scalar('loss/train', train_loss, itr)
+                writer.add_scalar('loss/val', val_loss, itr)
         key, key1 = jrandom.split(key)
         x_GxBxD, y_GxBxD = get_batch(
             train_data, config.model_config.block_size, config.batch_size, config.g_accum_iters)
@@ -213,12 +215,16 @@ def train(config: ExperimentConfig):
         model, opt_state, loss = step(model, opt_state, x_GxBxD, y_GxBxD, key1)
         if config.debug and itr == 0:
             loss.block_until_ready(); jax.profiler.stop_trace()
-        if not config.debug: mngr.save(itr, (jtu.tree_leaves(model), jtu.tree_leaves(opt_state)))
+        if not config.debug:
+            mngr.save(itr, (jtu.tree_leaves(model), jtu.tree_leaves(opt_state)))
         postfix_values['loss'] = loss.item()
-        postfix_values['lr'] = scheduler(opt_state[2].count).item()
+        # TODO: this operation is on a device that is not fully addressable.
+        # postfix_values['lr'] = scheduler(opt_state[2].count).item()
         if pbar.format_dict['rate'] is not None:
             postfix_values['thpt'] = pbar.format_dict['rate'] * config.batch_size * config.g_accum_iters
         pbar.set_postfix(**postfix_values)
     pbar.close()
-    writer.close()
-    mngr.wait_until_finished()
+    if jax.process_index() == 0:
+        writer.close()
+    if not config.debug:
+        mngr.wait_until_finished()
