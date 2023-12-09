@@ -6,3 +6,4 @@ _launch.py
 slurm_*.sh
 *.out
 outputs
+*_env
