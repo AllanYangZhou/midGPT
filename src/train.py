@@ -157,6 +157,9 @@ def train(config: ExperimentConfig):
     scheduler = optax.warmup_cosine_decay_schedule(
         0, config.learning_rate, config.warmup_steps, config.lr_decay_steps,
         end_value=config.min_lr)
+    @jax.jit
+    def get_lr(_optimizer):
+        return scheduler(_optimizer[2].count)
     optimizer = optax.chain(
         optax.clip_by_global_norm(1.0),
         optax.scale_by_adam(b2=config.beta2),
@@ -167,21 +170,21 @@ def train(config: ExperimentConfig):
     step, evaluate = make_training_fns(config, optimizer, mesh)
 
     key = jrandom.PRNGKey(0)
-    def init_sharded_model(model_key):
+    def init_trainstate(model_key):
         model = GPT(config.model_config, model_key)
         model = cast_pytree(model, config.param_dtype)
         model = shard_gpt(model, mesh, config.shard_model)
-        return model
+        def repl_opt_scalars(x: Array):
+            if x.ndim == 0:
+                x = with_sharding_constraint(x, NamedSharding(mesh, P()))
+            return x
+        opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
+        opt_state = jtu.tree_map(repl_opt_scalars, opt_state)
+        return model, opt_state
     key, key1 = jrandom.split(key)
-    # Use jit with sharding constraints to init sharded model.
-    model = eqx.filter_jit(init_sharded_model)(key1)
+    # Use jit with sharding constraints to init sharded model+opt.
+    model, opt_state = eqx.filter_jit(init_trainstate)(key1)
     print(f'Model has {count_params(model)} parameters.')
-    opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
-    def shard_opt_arr(x: Array):
-        if x.ndim == 0:
-            return reshard(x, NamedSharding(mesh, P()))
-        return x
-    opt_state = jtu.tree_map(shard_opt_arr, opt_state)
     first_step = 0
     if not config.debug and mngr.latest_step() is not None:  # Restore existing checkpoint.
         ex_state = (jtu.tree_leaves(model), jtu.tree_leaves(opt_state))
@@ -218,8 +221,7 @@ def train(config: ExperimentConfig):
         if not config.debug:
             mngr.save(itr, (jtu.tree_leaves(model), jtu.tree_leaves(opt_state)))
         postfix_values['loss'] = loss.item()
-        # TODO: this operation is on a device that is not fully addressable.
-        # postfix_values['lr'] = scheduler(opt_state[2].count).item()
+        postfix_values['lr'] = get_lr(optimizer).item()
         if pbar.format_dict['rate'] is not None:
             postfix_values['thpt'] = pbar.format_dict['rate'] * config.batch_size * config.g_accum_iters
         pbar.set_postfix(**postfix_values)
