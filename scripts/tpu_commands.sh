@@ -187,7 +187,7 @@ function tpu {
 
 
     # =============== TPU Project Specific Definitions ===============
-    export PROJECT_HOME='/Users/allanzhou/Projects'
+    export PROJECT_HOME='.'
     export PROJECT_NAME='midGPT'
     tpu_zone='europe-west4-a'
     if [ "$1" = "midGPT" ]; then
