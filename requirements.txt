@@ -10,3 +10,4 @@ orbax==0.1.9
 rich==13.7.0
 tensorboard==2.15.1
 tensorboardX==2.6.2.2
+gcsfs

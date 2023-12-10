@@ -10,7 +10,7 @@ jax.distributed.initialize()
 options = ocp.CheckpointManagerOptions(
     max_to_keep=1, save_interval_steps=100)
 mngr = ocp.CheckpointManager(
-    "gs://train_out/test",
+    "gs://training_out/test",
     ocp.AsyncCheckpointer(ocp.PyTreeCheckpointHandler()),
     options=options)
 
@@ -19,6 +19,6 @@ shardings = NamedSharding(mesh, P('data', None))
 @jax.jit
 def init():
     x = jnp.ones((128 * 64, 128 * 100))
-    return jax.with_sharding_constraint(x, shardings)
+    return with_sharding_constraint(x, shardings)
 A = init()
-mngr.save(0, A)
+mngr.save(0, [A])
