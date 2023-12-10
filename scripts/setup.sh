@@ -2,9 +2,12 @@
 
 source scripts/tpu_commands.sh
 
+# Remove any outdated info from known hosts.
+for ip in $(tpu midGPT ips node3); do ssh-keygen -R $ip; done
+
 tpu midGPT copy node3
-gcloud compute tpus tpu-vm ssh node3 --zone=europe-west4-a --worker=all --command="pip install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html"
-gcloud compute tpus tpu-vm ssh node3 --zone=europe-west4-a --worker=all --command="cd midGPT; pip install -r requirements.txt"
+tpu midGPT ssh node3 "pip install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html"
+tpu midGPT ssh node3 "cd midGPT; pip install -r requirements.txt"
 
 # Attach and mount PD that has dataset.
 gcloud alpha compute tpus tpu-vm attach-disk node3 \

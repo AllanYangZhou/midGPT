@@ -8,7 +8,7 @@ from jax.experimental import mesh_utils
 import optax
 import orbax.checkpoint as ocp
 import numpy as np
-from tensorboardX import SummaryWriter
+import wandb
 from tqdm import trange
 from .model import GPT, GPTConfig, shard_gpt, count_params
 
@@ -144,13 +144,11 @@ def train(config: ExperimentConfig):
     train_data = np.memmap(os.path.join(config.data_dir, 'train.bin'), dtype=np.uint16, mode='r').copy()
     val_data = np.memmap(os.path.join(config.data_dir, 'val.bin'), dtype=np.uint16, mode='r').copy()
 
-    if jax.process_index() == 0:
-        writer = SummaryWriter(os.path.join(config.rundir, 'logs'), flush_secs=30)
     if not config.debug:
         options = ocp.CheckpointManagerOptions(
             max_to_keep=1, save_interval_steps=config.eval_interval)
         mngr = ocp.CheckpointManager(
-            os.path.abspath(os.path.join(config.rundir, 'ckpt_mngr')),
+            config.rundir,
             ocp.AsyncCheckpointer(ocp.PyTreeCheckpointHandler()),
             options=options)
 
@@ -207,13 +205,12 @@ def train(config: ExperimentConfig):
             postfix_values['train_loss'] = train_loss
             postfix_values['val_loss'] = val_loss
             if jax.process_index() == 0:
-                writer.add_scalar('loss/train', train_loss, itr)
-                writer.add_scalar('loss/val', val_loss, itr)
+                wandb.log({'loss/train': train_loss, 'loss/val': val_loss}, step=itr)
         key, key1 = jrandom.split(key)
         x_GxBxD, y_GxBxD = get_batch(
             train_data, config.model_config.block_size, config.batch_size, config.g_accum_iters)
         if config.debug and itr == 0:
-            jax.profiler.start_trace(os.path.join(config.rundir, 'logs'))
+            jax.profiler.start_trace(config.rundir)
         x_GxBxD, y_GxBxD = reshard((x_GxBxD, y_GxBxD), data_sharding)
         model, opt_state, loss = step(model, opt_state, x_GxBxD, y_GxBxD, key1)
         if config.debug and itr == 0:
@@ -227,6 +224,6 @@ def train(config: ExperimentConfig):
         pbar.set_postfix(**postfix_values)
     pbar.close()
     if jax.process_index() == 0:
-        writer.close()
+        wandb.finish()
     if not config.debug:
         mngr.wait_until_finished()

@@ -135,7 +135,6 @@ function _tpu_launch {
 
     tpu_ips=$(_tpu_ips $tpu_zone $tpu_project $tpu_name)
     for host in $tpu_ips; do
-        #ssh $host "tmux new -d -s 'python ~/midGPT/launch.py --config=openwebtext --debug --multihost'" &
         ssh $host 'tmux new -d -s launch "$command"' &
     done
     wait &> /dev/null
