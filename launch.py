@@ -16,7 +16,6 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--config", type=str, required=True)
 parser.add_argument("--rundir", type=str)
 parser.add_argument("--debug", action="store_true")
-# TODO: we should just have separate launch scripts for these cases.
 parser.add_argument("--multihost", action="store_true")
 cmd_args = parser.parse_args()
 

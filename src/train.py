@@ -215,6 +215,8 @@ def train(config: ExperimentConfig):
         model, opt_state, loss = step(model, opt_state, x_GxBxD, y_GxBxD, key1)
         if config.debug and itr == 0:
             loss.block_until_ready(); jax.profiler.stop_trace()
+        if jax.process_index() == 0 and itr % 20 == 0:
+            wandb.log({'loss/optimized': loss.item()}, step=itr)
         if not config.debug:
             mngr.save(itr, (jtu.tree_leaves(model), jtu.tree_leaves(opt_state)))
         postfix_values['loss'] = loss.item()
