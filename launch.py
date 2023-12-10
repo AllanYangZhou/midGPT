@@ -64,7 +64,7 @@ if jax.process_index() == 0:  # Wandb and config setup
         with fopen(wandb_id_path, "w") as f:
             f.write(wandb_id)
     wandb.init(project="midgpt", id=wandb_id, resume="allow", config=config_dict)
-if config.multihost:
+if cmd_args.multihost:
     sync_global_devices("end_wandb_init")
 eqx.tree_pprint(config)
 train(config)
