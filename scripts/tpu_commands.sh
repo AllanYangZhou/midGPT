@@ -126,16 +126,17 @@ function _tpu_launch {
     tpu_zone=$1
     tpu_project=$2
     tpu_name=$3
-    #command=$4
+    command=$4
 
-    #if [ -z "$command" ]; then
-    #    echo "Invalid syntax!"
-    #    return 1
-    #fi
+    if [ -z "$command" ]; then
+        echo "Invalid syntax!"
+        return 1
+    fi
 
     tpu_ips=$(_tpu_ips $tpu_zone $tpu_project $tpu_name)
     for host in $tpu_ips; do
-        ssh $host "tmux new -d -s python ~/midGPT/launch.py --config=openwebtext --debug --multihost" &
+        #ssh $host "tmux new -d -s 'python ~/midGPT/launch.py --config=openwebtext --debug --multihost'" &
+        ssh $host 'tmux new -d -s launch "$command"' &
     done
     wait &> /dev/null
 }
@@ -231,10 +232,10 @@ function tpu {
     elif [ "$2" = "stop" ]; then
         _tpu_stop $tpu_zone $tpu_project $3
     elif [ "$2" = "launch" ]; then
-        _tpu_launch $tpu_zone $tpu_project $3 # $4
+        _tpu_launch $tpu_zone $tpu_project $3 $4
     elif [ "$2" = "cl" ]; then
         _tpu_copy $tpu_zone $tpu_project $3
-        _tpu_launch $tpu_zone $tpu_project $3 #$4
+        _tpu_launch $tpu_zone $tpu_project $3 $4
     elif [ "$2" = "maintain" ]; then
         _tpu_maintain $tpu_zone $tpu_project $3
     elif [ "$2" = "ssh" ]; then
