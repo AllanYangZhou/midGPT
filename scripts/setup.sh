@@ -11,5 +11,5 @@ gcloud alpha compute tpus tpu-vm attach-disk node3 \
   --zone=europe-west4-a \
   --disk=owt \
   --mode=read-only
-sudo mkdir -p /mnt/disks/persist
-sudo mount -o discard,defaults /dev/sdb /mnt/disks/persist
+#sudo mkdir -p /mnt/disks/persist
+#sudo mount -o discard,defaults /dev/sdb /mnt/disks/persist
