@@ -167,7 +167,7 @@ def shard_gpt(
     """Shard model parameters over devices (TPUs or GPUs)."""
     def sharding_map(x: Array) -> NamedSharding:
         axes = (None,) * x.ndim
-        if shard_model:
+        if x.size > 2**18 and shard_model:
             axes = (None,) * (x.ndim - 1) + ('data',)
         return NamedSharding(mesh, P(*axes))
     dynamic_model, static_model = eqx.partition(model, eqx.is_array)
