@@ -39,10 +39,11 @@ python launch.py --config=openwebtext --rundir=<rundir>
 Add a `--debug` if you want to (1) enable jax profiler and (2) skip checkpoint saving.
 
 ## Multihost setup
-Multihost training has only been tested on TPU slices (e.g., TPU v3-128), and we assume the dataset is openwebtext. Before starting, we will need some TPU commands:
+Multihost training has only been tested on TPU slices (e.g., TPU v3-128), and we assume the dataset is openwebtext. Before starting, change the `tpu_project` and `tpu_zone` variables in `scripts/tpu_commands.sh` to your project ID and zone. Then, source the TPU commands:
 ```bash
 source scripts/tpu_commands.sh
 ```
+
 
 The data should be in a folder `openwebtext/` on a Google Cloud persistent disk, which will then be mounted to each host. Modify `scripts/setup.sh` with the correct zone and disk name, then:
 ```bash
