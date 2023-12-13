@@ -33,8 +33,8 @@ Add a `--debug` if you want to (1) enable jax profiler and (2) skip checkpoint s
 ## Acknowledgements
 Compute was generously provided by the TPU Research Cloud (TRC).
 
-MidGPT was originally developed by Allan Zhou and Nick Landolfi, with helpful input from Yiding Jiang.
-
 * Tasks and data loading copied from [nanoGPT](https://github.com/karpathy/nanoGPT/)
 * TPU shell commands adapted from [easyLM](https://github.com/young-geng/EasyLM)
-*  We use higher learning rates, independent weight decay, and QK LayerNorm based on the results of [small-scale proxies](https://arxiv.org/abs/2106.04754)
+*  Higher learning rates, independent weight decay, and QK-LayerNorm were adopted based on the results of [small-scale proxies](https://arxiv.org/abs/2309.14322)
+
+MidGPT was originally developed by Allan Zhou and Nick Landolfi, with helpful input from Yiding Jiang.
