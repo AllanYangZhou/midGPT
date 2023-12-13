@@ -1,13 +1,10 @@
-# Jax install on your GPU/TPU setup, see instructions.
-# jax==0.4.20
 equinox==0.11.2
 tiktoken==0.5.1
 optax==0.1.7
-jmp @ git+https://github.com/deepmind/jmp@5dfab8e2e3f086740bed961f8a18402e5eb4da12
 tqdm==4.66.1
 transformers==4.35.2
 tiktoken==0.5.1
 orbax==0.1.9
 rich==13.7.0
-tensorboard==2.15.1
-tensorboardX==2.6.2.2
+gcsfs
+wandb

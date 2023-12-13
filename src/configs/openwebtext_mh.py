@@ -4,10 +4,10 @@ from src.model import GPTConfig
 config = ExperimentConfig(
     rundir='',
     data_dir='/mnt/disks/persist/openwebtext',
-    learning_rate=2e-4,
-    batch_size=1024,
-    warmup_steps=5000,
-    min_lr=2e-5,
+    learning_rate=1e-3,
+    batch_size=2048,
+    warmup_steps=5_000,
+    min_lr=1e-5,
     lr_decay_steps=60_000,
     max_steps=60_000,
     beta2=0.95,
@@ -16,7 +16,7 @@ config = ExperimentConfig(
     compute_dtype='bfloat16',
     param_dtype='float32',
     g_accum_iters=1,
-    shard_model=True,
+    shard_model=False,
     model_config=GPTConfig(
-        block_size=1024, vocab_size=50304, n_layer=24, n_head=16, n_embd=2048, dropout=0.0)
+        block_size=1024, vocab_size=50304, n_layer=12, n_head=12, n_embd=768, dropout=0.0)
 )
