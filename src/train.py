@@ -5,10 +5,10 @@ import os
 import equinox as eqx
 import jax
 from jax.experimental import mesh_utils
-import optax # type: ignore
-import orbax.checkpoint as ocp # type: ignore
+import optax
+import orbax.checkpoint as ocp
 import numpy as np
-import wandb # type: ignore
+import wandb
 from tqdm import trange
 from .model import GPT, GPTConfig, shard_gpt, count_params
 
