@@ -47,7 +47,7 @@ source scripts/tpu_commands.sh
 
 The data should be in a folder `openwebtext/` on a Google Cloud persistent disk, which will then be mounted to each host. Modify `scripts/setup.sh` with the correct zone and disk name, then:
 ```bash
-./scripts/setup.sh <zone> <node> <disk> # after bringing up TPU slice
+./scripts/setup.sh <zone> <TPU name> <disk name> # after bringing up TPU slice
 ```
 
 To start training a 1.5B model:
