@@ -1,7 +1,7 @@
 # midGPT
 A simple and hackable repository for experimenting on LLM pretraining, built using Jax+[Equinox](https://github.com/patrick-kidger/equinox). This codebase trains GPT-style decoder-only Transformers with billions of parameters on TPUs or GPUs.
 
-MidGPT is inspired by [NanoGPT](https://github.com/karpathy/nanoGPT/), but supports FSDP-style sharding across multiple devices and hosts for training larger models. It also includes some recent Transformer improvements: rotary embeddings, RMSNorm, QK-Layernorm, and independent weight decay, which can improve or stabilize training at larger scales.
+MidGPT is inspired by [NanoGPT](https://github.com/karpathy/nanoGPT/), but supports FSDP across multiple devices and hosts for training larger models. It also includes some recent Transformer improvements: rotary embeddings, RMSNorm, QK-Layernorm, and independent weight decay, which can improve or stabilize training at larger scales.
 
 Model code is in `src/model.py`, training code is in `src/train.py`. Experiments are configured in `src/configs/*.py`. Tested on Python **3.10.12**.
 
@@ -51,7 +51,7 @@ The data should be in a folder `openwebtext/` on a Google Cloud persistent disk,
 
 To start training a 1.5B model:
 ```bash
-tpu midGPT ssh <TPU name> 'tmux new -d -s launch "WANDB_API_KEY=<your key> python ~/midGPT/launch.py --config=openwebtext_xl --multihost --rundir=gs://training_out/xl"'
+tpu midGPT ssh <TPU name> 'tmux new -d -s launch "WANDB_API_KEY=<your key> python ~/midGPT/launch.py --config=openwebtext_xl --multihost --rundir=gs://your_bucket_name/run_name"'
 ```
 
 ## Debugging
