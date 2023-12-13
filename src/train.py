@@ -5,18 +5,20 @@ import os
 import equinox as eqx
 import jax
 from jax.experimental import mesh_utils
-import optax
-import orbax.checkpoint as ocp
+import optax # type: ignore
+import orbax.checkpoint as ocp # type: ignore
 import numpy as np
-import wandb
+import wandb # type: ignore
 from tqdm import trange
 from .model import GPT, GPTConfig, shard_gpt, count_params
 
 jax.config.update("jax_threefry_partitionable", True)
 
 jnp, jrandom, vmap, scan, jtu = jax.numpy, jax.random, jax.vmap, jax.lax.scan, jax.tree_util
-Array, KeyArray = jax.Array, tp.Any
-Mesh, NamedSharding = jax.sharding.Mesh, jax.sharding.NamedSharding
+Array = jax.Array
+KeyArray = tp.Any
+Mesh = jax.sharding.Mesh
+NamedSharding = jax.sharding.NamedSharding
 P, with_sharding_constraint = jax.sharding.PartitionSpec, jax.lax.with_sharding_constraint
 
 
@@ -101,7 +103,7 @@ def make_training_fns(
     def step(model: GPT, opt_state, x_GxBxT: Array, y_GxBxT: Array, key: KeyArray):
         G = config.g_accum_iters
         params, static = eqx.partition((model), eqx.is_array)
-        params_cpt = cast_pytree(params, config.compute_dtype)
+        params_cpt = cast_pytree(params, jnp.dtype(config.compute_dtype))
         # compute loss and grad on microbatch, then scan over microbatches
         def microstep(grad_so_far, xykey_g: tp.Tuple[Array, Array, KeyArray]):
             loss, grad = jax.value_and_grad(loss_fn)(params_cpt, static, *xykey_g)
@@ -118,20 +120,20 @@ def make_training_fns(
         return model, opt_state, loss
 
     @eqx.filter_jit
-    def simple_loss(model: GPT, x: Array, y: Array, key: tp.Optional[KeyArray]) -> Array:
+    def simple_loss(model: tp.Union[GPT, eqx.Partial], x: jnp.ndarray, y: jnp.ndarray, key: tp.Optional[KeyArray]) -> jnp.ndarray:
         """Same as loss_fn, but doesn't split params into compute/static."""
         model_params, model_static = eqx.partition(model, eqx.is_array)
         return loss_fn(model_params, model_static, x, y, key)
 
     data_sharding = NamedSharding(mesh, P('data', None))  # (B, D)
-    def evaluate(model: GPT, data: np.ndarray) -> Array:
-        model = eqx.Partial(cast_pytree(model, config.compute_dtype), inference=True)
+    def evaluate(model: GPT, data: np.ndarray) -> float:
+        eval_model = eqx.Partial(cast_pytree(model, jnp.dtype(config.compute_dtype)), inference=True)
         tot_loss = 0
         num_eval_steps = 1 if config.debug else 200
         for i in range(num_eval_steps):
             x_BxD, y_BxD = get_batch(data, config.model_config.block_size, config.batch_size)
             x_BxD, y_BxD = reshard((x_BxD, y_BxD), data_sharding)
-            loss = simple_loss(model, x_BxD, y_BxD, None).item()
+            loss = simple_loss(eval_model, x_BxD, y_BxD, None).item()
             tot_loss = tot_loss + loss
         return tot_loss / num_eval_steps
 

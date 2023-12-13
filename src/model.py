@@ -5,10 +5,13 @@ import equinox as eqx
 import jax
 from .layers import Linear, Embedding, RMSNorm, fixed_pos_embedding, apply_rotary_pos_emb
 
-jnp, jrandom, vmap, Array, jtu = jax.numpy, jax.random, jax.vmap, jax.Array, jax.tree_util
+jnp, jrandom, vmap, jtu = jax.numpy, jax.random, jax.vmap, jax.tree_util
+Array = jax.Array
 KeyArray = tp.Any
-P, NamedSharding = jax.sharding.PartitionSpec, jax.sharding.NamedSharding
-Mesh, with_sharding_constraint = jax.sharding.Mesh, jax.lax.with_sharding_constraint
+P = jax.sharding.PartitionSpec
+NamedSharding = jax.sharding.NamedSharding
+Mesh = jax.sharding.Mesh
+with_sharding_constraint = jax.lax.with_sharding_constraint
 
 
 class MLP(eqx.Module):
@@ -166,7 +169,7 @@ def shard_gpt(
 ) -> eqx.Module:
     """Shard model parameters over devices (TPUs or GPUs)."""
     def sharding_map(x: Array) -> NamedSharding:
-        axes = (None,) * x.ndim
+        axes: tuple[tp.Any, ...] = (None,) * x.ndim
         if x.size > 2**18 and shard_model:
             axes = (None,) * (x.ndim - 1) + ('data',)
         return NamedSharding(mesh, P(*axes))

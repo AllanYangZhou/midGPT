@@ -4,7 +4,9 @@ import numpy as np
 import equinox as eqx
 import jax
 
-jnp, Array, KeyArray = jax.numpy, jax.numpy.ndarray, tp.Any
+jnp = jax.numpy
+KeyArray = tp.Any
+Array = jax.numpy.ndarray
 jrandom = jax.random
 
 
