@@ -4,7 +4,6 @@ function _tpu_ips {
     tpu_zone=$1
     tpu_project=$2
     tpu_name=$3
-    #gcloud alpha compute tpus tpu-vm describe $tpu_name --zone $tpu_zone --project $tpu_project | grep -oP 'externalIp: \K(.+)$'
     gcloud alpha compute tpus tpu-vm describe $tpu_name --zone $tpu_zone --project $tpu_project | grep 'externalIp' | awk '{print $2}'
 }
 
