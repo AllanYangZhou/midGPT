@@ -34,9 +34,6 @@ parser.add_argument("--start", type=str, default="\n")
 parser.add_argument("--num_samples", type=int, default=10)
 parser.add_argument("--max_new_tokens", type=int, default=500)
 parser.add_argument("--temperature", type=float, default=0.8)
-# retain only the top_k most likely tokens, clamp others to have 0 probability
-# TODO: implement
-parser.add_argument("--top_k", type=int, default=200)
 cmd_args = parser.parse_args()
 
 if cmd_args.ckpt_dir.startswith("gs://"):
@@ -69,7 +66,7 @@ def from_json(json_path, dataclass_type):
 
 
 def generate(
-    config, batched_model, idx, max_new_tokens, temperature=1.0, top_k=None, key=None
+    config, batched_model, idx, max_new_tokens, temperature=1.0, key=None
 ):
     block_size = config.model_config.block_size
     for _ in range(max_new_tokens):
@@ -86,7 +83,6 @@ def generate(
         logits = batched_model(idx_cond_new)
         # pluck the logits at the final step and scale by desired temperature
         logits = logits[:, pluck_T, :] / temperature
-        # TODO: handle top_k
         key, next_token_key = jrandom.split(key)
         # sample from the distribution
         idx_next = jax.random.categorical(
@@ -193,7 +189,6 @@ y = generate(
     x,
     cmd_args.max_new_tokens,
     temperature=cmd_args.temperature,
-    # top_k=cmd_args.top_k, # TODO
     key=sample_key,
 )
 samples = [decode(y[i].tolist()) for i in range(cmd_args.num_samples)]
