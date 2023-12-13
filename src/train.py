@@ -120,7 +120,7 @@ def make_training_fns(
         return model, opt_state, loss
 
     @eqx.filter_jit
-    def simple_loss(model: tp.Union[GPT, eqx.Partial], x: jnp.ndarray, y: jnp.ndarray, key: tp.Optional[KeyArray]) -> jnp.ndarray:
+    def simple_loss(model: tp.Union[GPT, eqx.Partial], x: Array, y: Array, key: tp.Optional[KeyArray]) -> Array:
         """Same as loss_fn, but doesn't split params into compute/static."""
         model_params, model_static = eqx.partition(model, eqx.is_array)
         return loss_fn(model_params, model_static, x, y, key)
@@ -131,8 +131,8 @@ def make_training_fns(
         tot_loss = 0
         num_eval_steps = 1 if config.debug else 200
         for i in range(num_eval_steps):
-            x_BxD, y_BxD = get_batch(data, config.model_config.block_size, config.batch_size)
-            x_BxD, y_BxD = reshard((x_BxD, y_BxD), data_sharding)
+            x_BxD_np, y_BxD_np = get_batch(data, config.model_config.block_size, config.batch_size)
+            x_BxD, y_BxD = reshard((x_BxD_np, y_BxD_np), data_sharding)
             loss = simple_loss(eval_model, x_BxD, y_BxD, None).item()
             tot_loss = tot_loss + loss
         return tot_loss / num_eval_steps
@@ -216,7 +216,8 @@ def train(config: ExperimentConfig):
         x_GxBxD, y_GxBxD = reshard((x_GxBxD, y_GxBxD), data_sharding)
         model, opt_state, loss = step(model, opt_state, x_GxBxD, y_GxBxD, key1)
         if config.debug and itr == 0:
-            loss.block_until_ready(); jax.profiler.stop_trace()
+            loss.block_until_ready()
+            jax.profiler.stop_trace()
         if jax.process_index() == 0 and itr % 20 == 0:
             wandb.log({'loss/optimized': loss.item()}, step=itr)
         if not config.debug:

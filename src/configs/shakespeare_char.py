@@ -1,4 +1,3 @@
-import jax.numpy as jnp
 from src.train import ExperimentConfig
 from src.model import GPTConfig
 

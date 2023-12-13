@@ -22,9 +22,12 @@ class Embedding(eqx.Module):
     ):
         super().__init__()
         self.V, self.D = num_embeddings, embedding_size
-        self.weight_VxD = weight
-        if self.weight_VxD is None:
+        if weight is not None:
+            self.weight_VxD = weight
+        elif key is not None:
             self.weight_VxD = jrandom.normal(key, (self.V, self.D))
+        else:
+            raise ValueError("need weight or key to be not None")
 
     @jax.named_scope("Embedding")
     def __call__(self, x_T, *, key=None):
@@ -40,10 +43,13 @@ class Linear(eqx.Module):
         *, key: tp.Optional[KeyArray]=None
     ):
         super().__init__()
-        self.weight_MxN = weight
-        if self.weight_MxN is None:
+        if weight is not None:
+            self.weight_MxN = weight
+        elif key is not None:
             self.weight_MxN = (1 / math.sqrt(in_features)) * jrandom.truncated_normal(
                 key, lower=-2, upper=2, shape=(out_features, in_features))
+        else:
+            raise ValueError("need weight or key to be not None")
 
     @jax.named_scope("Linear")
     def __call__(self, x_N: Array, *, key: KeyArray=None) -> Array:
@@ -83,9 +89,9 @@ def rotate_every_two(x: Array) -> Array:  # [a b c d] -> [-b a -d c]
     return jnp.reshape(x, x.shape[:-2] + (-1,))
 
 
-def apply_rotary_pos_emb(x_HxTxC: Array, sin_TxD: np.ndarray, cos_TxD: np.ndarray) -> Array:
-    sin_TxD = jnp.asarray(sin_TxD, dtype=x_HxTxC.dtype)
-    cos_TxD = jnp.asarray(cos_TxD, dtype=x_HxTxC.dtype)
+def apply_rotary_pos_emb(x_HxTxC: Array, sin_TxD_np: np.ndarray, cos_TxD_np: np.ndarray) -> Array:
+    sin_TxD = jnp.asarray(sin_TxD_np, dtype=x_HxTxC.dtype)
+    cos_TxD = jnp.asarray(cos_TxD_np, dtype=x_HxTxC.dtype)
     sin_1xTxC = jnp.stack((sin_TxD, sin_TxD), axis=-1)
     sin_1xTxC = jnp.reshape(sin_1xTxC, sin_1xTxC.shape[:-2] + (-1,))
     cos_1xTxC = jnp.stack((cos_TxD, cos_TxD), axis=-1)
