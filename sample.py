@@ -68,10 +68,10 @@ def from_json(json_path, dataclass_type):
     return convert(json.loads(json_string), dataclass_type)
 
 
-def generate(config, model, idx, max_new_tokens, temperature=1.0, top_k=None, key=None):
+def generate(
+    config, batched_model, idx, max_new_tokens, temperature=1.0, top_k=None, key=None
+):
     block_size = config.model_config.block_size
-    # TODO: Move JIT outside this function?
-    batched_model = eqx.filter_jit(jax.vmap(eqx.Partial(model, inference=True)))
     for _ in range(max_new_tokens):
         # take the final block_size tokens for conditioning, if the sequence is too long
         idx_cond = idx if idx.shape[1] <= block_size else idx[:, -block_size:]
@@ -90,8 +90,10 @@ def generate(config, model, idx, max_new_tokens, temperature=1.0, top_k=None, ke
         key, next_token_key = jrandom.split(key)
         # sample from the distribution
         idx_next = jax.random.categorical(
-            next_token_key, logits, axis=1, shape=(idx.shape[0], 1)
-        )
+            next_token_key,
+            logits,
+            axis=1,
+        ).reshape((idx.shape[0], 1))
         # append sampled index to the running sequence and continue
         idx = jnp.concatenate([idx, idx_next], axis=1)
     return idx
@@ -160,15 +162,21 @@ else:
     encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
     decode = lambda l: enc.decode(l)
 
+model = cast_pytree(model, jnp.dtype(config.compute_dtype))
+
+block_size = config.model_config.block_size
+batched_model = eqx.filter_jit(jax.vmap(eqx.Partial(model, inference=True)))
+
 # load the prompt
 start = cmd_args.start
 if start.startswith("FILE:"):
     with open(start[5:], "r", encoding="utf-8") as f:
         start = f.read()
 
-start_ids = encode(start)
-x = np.array([start_ids])
+key = jrandom.PRNGKey(0)
 
+start_ids = encode(start if start != "" else "\n")
+x = np.array([start_ids for _ in range(cmd_args.num_samples)])
 devices = jax.devices()
 mesh = Mesh(mesh_utils.create_device_mesh((len(devices),)), axis_names=("data",))
 # TODO: currently replicating all data. Shard data properly.
@@ -178,18 +186,17 @@ jax.debug.visualize_array_sharding(x)
 jax.debug.visualize_array_sharding(model.lm_head.weight_MxN)
 
 print("generating samples...")
-model = cast_pytree(model, jnp.dtype(config.compute_dtype))
-key = jrandom.PRNGKey(0)
-for _ in range(cmd_args.num_samples):
-    key, sample_key = jrandom.split(key)
-    y = generate(
-        config,
-        model,
-        x,
-        cmd_args.max_new_tokens,
-        temperature=cmd_args.temperature,
-        top_k=cmd_args.top_k,
-        key=sample_key,
-    )
-    print(decode(y[0].tolist()))
+key, sample_key = jrandom.split(key)
+y = generate(
+    config,
+    batched_model,
+    x,
+    cmd_args.max_new_tokens,
+    temperature=cmd_args.temperature,
+    # top_k=cmd_args.top_k, # TODO
+    key=sample_key,
+)
+samples = [decode(y[i].tolist()) for i in range(cmd_args.num_samples)]
+for s in samples:
+    print(s)
     print("---------------")
