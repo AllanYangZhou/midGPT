@@ -17,17 +17,13 @@ python prepare.py
 ```
 
 ## Single host, multiple device setup
-From a fresh Python 3.10+ virtualenv, [install Jax](https://jax.readthedocs.io/en/latest/installation.html), then `pip install -r requirements.txt`. On TPU VMs, the Jax install is:
-
-```bash
-pip install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
-```
+From a fresh Python 3.10+ virtualenv, [install Jax](https://jax.readthedocs.io/en/latest/installation.html) for your accelerator type, then `pip install -r requirements.txt`. To profile performance, also `pip install tensorflow-cpu tensorboard-plugin-profile`.
 
 Start training:
 ```bash
 export WANDB_API_KEY=<your key>
 python launch.py --config=shakespeare_char
-python launch.py --config=openwebtext
+python launch.py --config=openwebtext  # 124M model
 ```
 
 By default, this will create a timestamped rundir in `outputs/`. You can also manually specify `--rundir`, which is useful for resuming training:
@@ -55,9 +51,8 @@ To start training a 1.5B model:
 tpu midGPT ssh <TPU name> 'tmux new -d -s launch "WANDB_API_KEY=<your key> python ~/midGPT/launch.py --config=openwebtext_xl --multihost --rundir=gs://your_bucket_name/run_name"'
 ```
 
-## Debugging
-* Testing parallelism in cpu: `JAX_PLATFORM_NAME=cpu XLA_FLAGS=--xla_force_host_platform_device_count=8 python train_shakespeare.py`.
-* TB profiler: `pip install tensorflow-cpu tensorboard-plugin-profile`.
+## Expected performance
+The config `openwebtext.py` trains a 124M model analogous to nanoGPT, and should achieve ~2.80 val loss after all 60,000 steps. The config `openwebtext_xl.py` trains a 1.5B model, and should achieve a val loss <2.7 within the first 9k steps.
 
 ## Acknowledgements
 Compute was generously provided by the TPU Research Cloud (TRC).
