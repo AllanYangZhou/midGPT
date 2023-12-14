@@ -52,7 +52,7 @@ tpu midGPT ssh <TPU name> 'tmux new -d -s launch "WANDB_API_KEY=<your key> pytho
 ```
 
 ## Expected performance
-The config `openwebtext.py` trains a 124M model analogous to nanoGPT, and should achieve ~2.80 val loss after all 60,000 steps. The config `openwebtext_xl.py` trains a 1.5B model, and should achieve a val loss <2.7 within the first 9k steps.
+The config `openwebtext.py` trains a 124M model analogous to nanoGPT, and should achieve ~2.80 val loss after all 60,000 steps. The config `openwebtext_xl.py` trains a 1.5B model, and should achieve a val loss ~2.45 within the first 9k steps.
 
 ## Acknowledgements
 Compute was generously provided by the TPU Research Cloud (TRC).
