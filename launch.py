@@ -28,7 +28,7 @@ config = getattr(
 if cmd_args.rundir is not None:
     config.rundir = cmd_args.rundir
 else:
-    assert not config.multihost, "Multihost must prespecify rundir."
+    assert not cmd_args.multihost, "Multihost must prespecify rundir."
     config.rundir = os.path.join(
         "outputs", datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
     )
