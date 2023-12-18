@@ -27,7 +27,7 @@ config = getattr(
 ).config
 if cmd_args.rundir is not None:
     config.rundir = cmd_args.rundir
-else:
+elif not cmd_args.debug:
     assert not cmd_args.multihost, "Multihost must prespecify rundir."
     config.rundir = os.path.join(
         "outputs", datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
@@ -35,33 +35,36 @@ else:
 if cmd_args.debug:
     config.debug = True
 
-print(f"Writing to {config.rundir}")
-if config.rundir.startswith("gs://"):
-    print("Using GCS filesystem")
-    fs = gcsfs.GCSFileSystem()
-    fopen = fs.open
-else:
-    print("Using local filesystem")
-    config.rundir = os.path.abspath(config.rundir)
-    fs = os
-    fopen = open
-
 if jax.process_index() == 0:  # Wandb and config setup
-    # make sure the directory exists
-    fs.makedirs(config.rundir, exist_ok=True)
-
+    wandb_id = None
     config_dict = asdict(config)
-    with fopen(os.path.join(config.rundir, "config.json"), "w") as f:
-        f.write(json.dumps(config_dict))
+    if not cmd_args.debug:
+        print(f"Writing to {config.rundir}")
+        if config.rundir.startswith("gs://"):
+            print("Using GCS filesystem")
+            fs = gcsfs.GCSFileSystem()
+            fopen, exists = fs.open, fs.exists
+        else:
+            print("Using local filesystem")
+            config.rundir = os.path.abspath(config.rundir)
+            fs, fopen, exists = os, open, os.path.exists
 
-    wandb_id_path = os.path.join(config.rundir, "wandb_id.txt")
-    if fs.exists(wandb_id_path):
-        with fopen(wandb_id_path, "r") as f:
-            wandb_id = f.read()
-    else:
-        wandb_id = wandb.util.generate_id()
-        with fopen(wandb_id_path, "w") as f:
-            f.write(wandb_id)
+        # make sure the directory exists
+        fs.makedirs(config.rundir, exist_ok=True)
+
+        # write config as json
+        with fopen(os.path.join(config.rundir, "config.json"), "w") as f:
+            f.write(json.dumps(config_dict))
+
+        # Load wandb id or write it, for proper wandb resuming.
+        wandb_id_path = os.path.join(config.rundir, "wandb_id.txt")
+        if exists(wandb_id_path):
+            with fopen(wandb_id_path, "r") as f:
+                wandb_id = f.read()
+        else:
+            wandb_id = wandb.util.generate_id()
+            with fopen(wandb_id_path, "w") as f:
+                f.write(wandb_id)
     wandb.init(project="midgpt", id=wandb_id, resume="allow", config=config_dict)
 if cmd_args.multihost:
     sync_global_devices("end_wandb_init")
