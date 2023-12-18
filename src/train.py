@@ -66,27 +66,27 @@ def get_batch(
 
 
 def tree_broadcast(prefix, target):
-  def _broadcast(leaf, subtree):
-    return jtu.tree_map(lambda _: leaf, subtree)
-  return jtu.tree_map(_broadcast, prefix, target)
+    def _broadcast(leaf, subtree):
+        return jtu.tree_map(lambda _: leaf, subtree)
+    return jtu.tree_map(_broadcast, prefix, target)
 
 
 def reshard(tree, shardings):
-  def _make_global_arr(x, shard, shape):
-    # Avoid unnecessary copies and transfers:
-    if hasattr(x, "sharding") and x.sharding.is_equivalent_to(shard, len(shape)):  # pylint: disable=line-too-long
-      return x
-    if not getattr(x, "is_fully_addressable", True):
-      raise RuntimeError("Trying to reshard a non-fully-addressable array. "
-                         "Please see the doc-comment for detailed explanation.")
-    x = jax.device_get(x)  # Might be on local devices.
-    xs = [jax.device_put(x[s], device=d)
-          for d, s in shard.addressable_devices_indices_map(shape).items()]
-    return jax.make_array_from_single_device_arrays(shape, shard, xs)
+    # From https://github.com/google-research/big_vision/blob/1b17abc6b754175dcd92e9db3e13c409e2ccb951/big_vision/utils.py#L1288
+    def _make_global_arr(x, shard, shape):
+        # Avoid unnecessary copies and transfers:
+        if hasattr(x, "sharding") and x.sharding.is_equivalent_to(shard, len(shape)):
+            return x
+        if not getattr(x, "is_fully_addressable", True):
+            raise RuntimeError("Trying to reshard a non-fully-addressable array. See link above.")
+        x = jax.device_get(x)  # Might be on local devices.
+        xs = [jax.device_put(x[s], device=d)
+              for d, s in shard.addressable_devices_indices_map(shape).items()]
+        return jax.make_array_from_single_device_arrays(shape, shard, xs)
 
-  shapes = jax.tree_map(np.shape, tree)
-  shardings = tree_broadcast(shardings, tree)
-  return jax.tree_map(_make_global_arr, tree, shardings, shapes)
+    shapes = jax.tree_map(np.shape, tree)
+    shardings = tree_broadcast(shardings, tree)
+    return jax.tree_map(_make_global_arr, tree, shardings, shapes)
 
 
 def make_training_fns(
@@ -125,7 +125,7 @@ def make_training_fns(
         model_params, model_static = eqx.partition(model, eqx.is_array)
         return loss_fn(model_params, model_static, x, y, key)
 
-    data_sharding = NamedSharding(mesh, P('data', None))  # (B, D)
+    data_sharding = NamedSharding(mesh, P(('replica', 'data'), None))  # (B, D)
     def evaluate(model: GPT, data: np.ndarray) -> float:
         eval_model = eqx.Partial(cast_pytree(model, jnp.dtype(config.compute_dtype)), inference=True)
         tot_loss = 0
@@ -141,7 +141,8 @@ def make_training_fns(
 
 
 def train(config: ExperimentConfig):
-    mesh = Mesh(mesh_utils.create_device_mesh((jax.device_count(),)), axis_names=('data',))
+    n_devices = jax.device_count()  # Assumes num_devices is multiple of 8.
+    mesh = Mesh(mesh_utils.create_device_mesh((n_devices // 8, 8)), axis_names=('replica', 'data'))
 
     train_data = np.memmap(os.path.join(config.data_dir, 'train.bin'), dtype=np.uint16, mode='r').copy()
     val_data = np.memmap(os.path.join(config.data_dir, 'val.bin'), dtype=np.uint16, mode='r').copy()
@@ -195,7 +196,7 @@ def train(config: ExperimentConfig):
         model = jtu.tree_unflatten(jtu.tree_structure(model), model_leaves)
         opt_state = jtu.tree_unflatten(jtu.tree_structure(opt_state), opt_state_leaves)
         first_step = mngr.latest_step() + 1
-    data_sharding = NamedSharding(mesh, P(None, 'data', None))  # (G, B, D)
+    data_sharding = NamedSharding(mesh, P(None, ('replica', 'data'), None))  # (G, B, D)
     postfix_values = {}  # values to display in the progress bar
     pbar = trange(
         first_step, config.max_steps, initial=first_step, total=config.max_steps,
