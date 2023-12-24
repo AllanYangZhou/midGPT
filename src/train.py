@@ -65,6 +65,19 @@ def get_batch(
     return x, y
 
 
+def get_sharding_fn(mesh):
+    """Returns fn that places numpy arrays on mesh sharded along axis 1."""
+    n_procs = jax.process_count()
+    sharding = NamedSharding(mesh, P(None, ('replica', 'data'), None))  # (G, B, D)
+    def shard(x):
+        local_ds = mesh.local_devices
+        xs = jax.device_put(np.split(x, len(local_ds), axis=1), local_ds)
+        global_shape = (x.shape[0], x.shape[1] * n_procs, *x.shape[2:])
+        # each proc has its own sub-batch--"combine" them together into a jax array.
+        return jax.make_array_from_single_device_arrays(global_shape, sharding, xs)
+    return shard
+
+
 def tree_broadcast(prefix, target):
     def _broadcast(leaf, subtree):
         return jtu.tree_map(lambda _: leaf, subtree)
@@ -120,20 +133,26 @@ def make_training_fns(
         return model, opt_state, loss
 
     @eqx.filter_jit
-    def simple_loss(model: tp.Union[GPT, eqx.Partial], x: Array, y: Array, key: tp.Optional[KeyArray]) -> Array:
+    def simple_loss(
+        model: tp.Union[GPT, eqx.Partial], x_1xBxD: Array, y_1xBxD: Array,
+        key: tp.Optional[KeyArray]
+    ) -> Array:
         """Same as loss_fn, but doesn't split params into compute/static."""
+        x_BxD, y_BxD = x_1xBxD.squeeze(0), y_1xBxD.squeeze(0)
         model_params, model_static = eqx.partition(model, eqx.is_array)
-        return loss_fn(model_params, model_static, x, y, key)
+        return loss_fn(model_params, model_static, x_BxD, y_BxD, key)
 
-    data_sharding = NamedSharding(mesh, P(('replica', 'data'), None))  # (B, D)
+    n_procs = jax.process_count()
+    shard_data = get_sharding_fn(mesh)
     def evaluate(model: GPT, data: np.ndarray) -> float:
         eval_model = eqx.Partial(cast_pytree(model, jnp.dtype(config.compute_dtype)), inference=True)
         tot_loss = 0
         num_eval_steps = 1 if config.debug else 200
         for i in range(num_eval_steps):
-            x_BxD_np, y_BxD_np = get_batch(data, config.model_config.block_size, config.batch_size)
-            x_BxD, y_BxD = reshard((x_BxD_np, y_BxD_np), data_sharding)
-            loss = simple_loss(eval_model, x_BxD, y_BxD, None).item()
+            x_1xBxD_np, y_1xBxD_np = get_batch(
+                data, config.model_config.block_size, config.batch_size // n_procs, g_accum_iters=1)
+            x_1xBxD, y_1xBxD = shard_data((x_1xBxD_np, y_1xBxD_np))
+            loss = simple_loss(eval_model, x_1xBxD, y_1xBxD, None).item()
             tot_loss = tot_loss + loss
         return tot_loss / num_eval_steps
 
@@ -141,6 +160,7 @@ def make_training_fns(
 
 
 def train(config: ExperimentConfig):
+    n_procs = jax.process_count()
     n_devices = jax.device_count()  # Assumes num_devices is multiple of 8.
     mesh = Mesh(mesh_utils.create_device_mesh((n_devices // 8, 8)), axis_names=('replica', 'data'))
 
@@ -196,7 +216,7 @@ def train(config: ExperimentConfig):
         model = jtu.tree_unflatten(jtu.tree_structure(model), model_leaves)
         opt_state = jtu.tree_unflatten(jtu.tree_structure(opt_state), opt_state_leaves)
         first_step = mngr.latest_step() + 1
-    data_sharding = NamedSharding(mesh, P(None, ('replica', 'data'), None))  # (G, B, D)
+    data_shard_fn = get_sharding_fn(mesh)
     postfix_values = {}  # values to display in the progress bar
     pbar = trange(
         first_step, config.max_steps, initial=first_step, total=config.max_steps,
@@ -210,11 +230,12 @@ def train(config: ExperimentConfig):
             if jax.process_index() == 0:
                 wandb.log({'loss/train': train_loss, 'loss/val': val_loss}, step=itr)
         key, key1 = jrandom.split(key)
-        x_GxBxD, y_GxBxD = get_batch(
-            train_data, config.model_config.block_size, config.batch_size, config.g_accum_iters)
+        x_GxBxD_np, y_GxBxD_np = get_batch(
+            train_data, config.model_config.block_size,
+            config.batch_size // n_procs, config.g_accum_iters)
         if config.debug and itr == 0:
             jax.profiler.start_trace(config.rundir)
-        x_GxBxD, y_GxBxD = reshard((x_GxBxD, y_GxBxD), data_sharding)
+        x_GxBxD, y_GxBxD = data_shard_fn((x_GxBxD_np, y_GxBxD_np))
         model, opt_state, loss = step(model, opt_state, x_GxBxD, y_GxBxD, key1)
         if config.debug and itr == 0:
             loss.block_until_ready()
