@@ -11,6 +11,7 @@ import numpy as np
 import wandb
 from tqdm import trange
 from .model import GPT, GPTConfig, shard_gpt, count_params
+from .sharding import reshard, get_shard_fn
 
 jax.config.update("jax_threefry_partitionable", True)
 
@@ -65,30 +66,6 @@ def get_batch(
     return x, y
 
 
-def tree_broadcast(prefix, target):
-    def _broadcast(leaf, subtree):
-        return jtu.tree_map(lambda _: leaf, subtree)
-    return jtu.tree_map(_broadcast, prefix, target)
-
-
-def reshard(tree, shardings):
-    # From https://github.com/google-research/big_vision/blob/1b17abc6b754175dcd92e9db3e13c409e2ccb951/big_vision/utils.py#L1288
-    def _make_global_arr(x, shard, shape):
-        # Avoid unnecessary copies and transfers:
-        if hasattr(x, "sharding") and x.sharding.is_equivalent_to(shard, len(shape)):
-            return x
-        if not getattr(x, "is_fully_addressable", True):
-            raise RuntimeError("Trying to reshard a non-fully-addressable array. See link above.")
-        x = jax.device_get(x)  # Might be on local devices.
-        xs = [jax.device_put(x[s], device=d)
-              for d, s in shard.addressable_devices_indices_map(shape).items()]
-        return jax.make_array_from_single_device_arrays(shape, shard, xs)
-
-    shapes = jax.tree_map(np.shape, tree)
-    shardings = tree_broadcast(shardings, tree)
-    return jax.tree_map(_make_global_arr, tree, shardings, shapes)
-
-
 def make_training_fns(
         config: ExperimentConfig, optimizer: optax.GradientTransformationExtraArgs,
         mesh: Mesh) -> tp.Tuple[tp.Callable, tp.Callable]:
@@ -125,14 +102,16 @@ def make_training_fns(
         model_params, model_static = eqx.partition(model, eqx.is_array)
         return loss_fn(model_params, model_static, x, y, key)
 
-    data_sharding = NamedSharding(mesh, P(('replica', 'data'), None))  # (B, D)
+    data_sharding = NamedSharding(mesh, P(None, ('replica', 'data'), None))  # (G, B, D)
+    shard_fn = get_shard_fn(mesh, data_sharding)
     def evaluate(model: GPT, data: np.ndarray) -> float:
         eval_model = eqx.Partial(cast_pytree(model, jnp.dtype(config.compute_dtype)), inference=True)
         tot_loss = 0
         num_eval_steps = 1 if config.debug else 200
         for i in range(num_eval_steps):
-            x_BxD_np, y_BxD_np = get_batch(data, config.model_config.block_size, config.batch_size)
-            x_BxD, y_BxD = reshard((x_BxD_np, y_BxD_np), data_sharding)
+            x_1xBxD_np, y_1xBxD_np = get_batch(data, config.model_config.block_size, config.batch_size, 1)
+            x_1xBxD, y_1xBxD = jtu.tree_map(shard_fn, (x_1xBxD_np, y_1xBxD_np))
+            x_BxD, y_BxD = x_1xBxD.squeeze(0), y_1xBxD.squeeze(0)
             loss = simple_loss(eval_model, x_BxD, y_BxD, None).item()
             tot_loss = tot_loss + loss
         return tot_loss / num_eval_steps
@@ -140,12 +119,22 @@ def make_training_fns(
     return step, evaluate
 
 
+def split_array_by_idx(arr_N, proc_idx, n_proc):
+    n = int(arr_N.shape[0] / n_proc) + 1  # n per proc
+    return arr_N[proc_idx * n:(proc_idx+1)*n]
+
+
 def train(config: ExperimentConfig):
+    n_proc, proc_idx = jax.process_count(), jax.process_index()
     n_devices = jax.device_count()  # Assumes num_devices is multiple of 8.
     mesh = Mesh(mesh_utils.create_device_mesh((n_devices // 8, 8)), axis_names=('replica', 'data'))
 
     train_data = np.memmap(os.path.join(config.data_dir, 'train.bin'), dtype=np.uint16, mode='r').copy()
     val_data = np.memmap(os.path.join(config.data_dir, 'val.bin'), dtype=np.uint16, mode='r').copy()
+    print("Raw shapes", train_data.shape, val_data.shape)
+    train_data = split_array_by_idx(train_data, proc_idx, n_proc)
+    val_data = split_array_by_idx(val_data, proc_idx, n_proc)
+    print(f"Process {proc_idx}/{n_proc}. train_data.shape={train_data.shape}, val_data.shape={val_data.shape}.")
 
     if not config.debug:
         options = ocp.CheckpointManagerOptions(
@@ -197,6 +186,7 @@ def train(config: ExperimentConfig):
         opt_state = jtu.tree_unflatten(jtu.tree_structure(opt_state), opt_state_leaves)
         first_step = mngr.latest_step() + 1
     data_sharding = NamedSharding(mesh, P(None, ('replica', 'data'), None))  # (G, B, D)
+    shard_fn = get_shard_fn(mesh, data_sharding)
     postfix_values = {}  # values to display in the progress bar
     pbar = trange(
         first_step, config.max_steps, initial=first_step, total=config.max_steps,
@@ -214,7 +204,7 @@ def train(config: ExperimentConfig):
             train_data, config.model_config.block_size, config.batch_size, config.g_accum_iters)
         if config.debug and itr == 0:
             jax.profiler.start_trace(config.rundir)
-        x_GxBxD, y_GxBxD = reshard((x_GxBxD, y_GxBxD), data_sharding)
+        x_GxBxD, y_GxBxD = jtu.tree_map(shard_fn, (x_GxBxD, y_GxBxD))
         model, opt_state, loss = step(model, opt_state, x_GxBxD, y_GxBxD, key1)
         if config.debug and itr == 0:
             loss.block_until_ready()

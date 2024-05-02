@@ -7,3 +7,5 @@ slurm_*.sh
 *.out
 outputs
 *_env
+wandb/
+plugins/
