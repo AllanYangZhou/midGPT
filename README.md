@@ -61,4 +61,14 @@ Compute was generously provided by the TPU Research Cloud (TRC).
 * TPU shell commands adapted from [easyLM](https://github.com/young-geng/EasyLM)
 *  Higher learning rates, independent weight decay, and QK-LayerNorm were adopted based on the results of [small-scale proxies](https://arxiv.org/abs/2309.14322)
 
-MidGPT was originally developed by Allan Zhou and Nick Landolfi, with helpful input from Yiding Jiang.
+## Citation
+If you would like to cite this work:
+
+```
+@article{zhou2023midgpt,
+    author={Allan Zhou and Nicholas C. Landolfi and Yiding Jiang},
+    title={mid{GPT}: a simple and hackable repository for LLM pretraining},
+    year={2023},
+    url={https://github.com/AllanYangZhou/midGPT},
+}
+```
